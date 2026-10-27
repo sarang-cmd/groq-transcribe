@@ -6,7 +6,8 @@ A focused audio-to-text workspace for transcribing recordings, optionally cleani
 
 ## What it does
 
-- Accepts MP3, MP4, MPEG, M4A, WAV, WebM, OGG, and FLAC files
+- Accepts MP3, MP4, MPEG, M4A, WAV, WebM, OGG, and FLAC audio, plus SRT and WebVTT subtitle files
+- Converts uploaded SRT and WebVTT cues locally between subtitle, text, and JSON exports without calling Groq
 - Transcribes with Groq's `whisper-large-v3-turbo` model
 - Uses one server-side `GROQ_API_KEY` for transcription and optional transcript cleanup (`llama-3.3-70b-versatile`)
 - Exports TXT, SRT, WebVTT, or JSON with timing segments
@@ -61,7 +62,7 @@ Audio and optional transcript text leave the app to be processed by Groq. Hostin
 ## Output details
 
 - **TXT** exports the editable transcript text.
-- **SRT** and **WebVTT** export the timestamped segments returned by transcription. Cleanup, when available, is applied per segment so the original timings remain intact. Manual edits to the transcript text field are not applied to timestamped subtitle exports.
+- **SRT** and **WebVTT** export timestamped segments. Cleanup, when available, is applied per segment so audio timing remains intact. Existing SRT and WebVTT files can be converted directly in the browser, preserving their cue times. Manual edits to the transcript text field are not applied to timestamped subtitle exports.
 - **JSON** includes the editable transcript field and original timestamped segment data.
 - ZIP filenames are derived from the uploaded audio filenames. Duplicate files with the same name and size are ignored in the same queue.
 
