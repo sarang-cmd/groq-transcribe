@@ -58,7 +58,7 @@ No Groq key is stored in this repository. Without `GROQ_API_KEY`, audio transcri
 
 ## Large-file processing and limits
 
-Vercel Functions reject request bodies above approximately 4.5 MB, so large recordings are uploaded directly from the browser to a **private** Blob store, rather than sent through an API route. Files above 100 MB use Blob multipart upload. The server then reads the private blob, converts it with FFmpeg to mono 16 kHz FLAC chunks of eight minutes, and sends those chunks to Groq one at a time. This stays below Groq's per-request audio limits and combines timestamps back into the original recording timeline. Temporary blobs are deleted after processing completes.
+Vercel Functions reject request bodies above approximately 4.5 MB, so large recordings are uploaded directly from the browser to a **private** Blob store, rather than sent through an API route. Files above 100 MB use Blob multipart upload. The server then reads the private blob, converts it with FFmpeg to mono 16 kHz FLAC chunks of eight minutes, and sends those chunks to Groq one at a time. This stays below Groq's per-request audio limits and combines timestamps back into the original recording timeline. Temporary blobs are deleted after processing completes; if the browser closes after upload but before processing starts, the orphaned blob may need to be removed from the Vercel Storage dashboard.
 
 Each audio file is capped at 200 MB. Large audio processing uses temporary disk and a Vercel function that can run for up to five minutes. The user's Groq plan still controls rate limits and billing. Large transcripts may therefore take longer or be rejected by Groq if the account reaches its audio quota.
 
