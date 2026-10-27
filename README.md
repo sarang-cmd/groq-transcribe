@@ -59,6 +59,8 @@ No Groq key was committed to this repository. The transcription endpoint returns
 
 Audio and optional transcript text leave the app to be processed by Groq. Hosting-provider request and execution logs, and Groq's current retention practices, are governed by their respective configurations and policies. Review both before processing sensitive recordings. See the draft [Privacy Policy](/privacy) and [Terms of Service](/terms); the service operator and contact details still need to be completed before production launch.
 
+**Access warning:** this prototype has no user accounts or durable rate limiting. Anyone who can reach the deployed site can submit audio using the operator's configured Groq key, and usage is billed to that Groq account. Add appropriate access control or a rate-limiting service before sharing the public URL broadly.
+
 ## Output details
 
 - **TXT** exports the editable transcript text.

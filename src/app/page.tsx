@@ -157,7 +157,7 @@ export default function Home() {
             {job.error && <p className="row-error">{job.error}</p>}
           </li>)}</ul>}
           {notice && <p className="notice" role="alert">{notice}</p>}
-          <div className="queue-actions"><p>{doneCount > 0 ? `${doneCount} of ${jobs.length} file${jobs.length === 1 ? '' : 's'} ready` : 'Files are processed securely with your Groq API key.'}</p><button className="primary-button" onClick={runAll} disabled={!jobs.some(job => job.kind === 'audio' && (job.status === 'queued' || job.status === 'error')) || busy}>{busy ? 'Transcribing…' : doneCount ? 'Transcribe remaining' : 'Transcribe audio'} <span aria-hidden="true">↗</span></button></div>
+          <div className="queue-actions"><p>{doneCount > 0 ? `${doneCount} of ${jobs.length} file${jobs.length === 1 ? '' : 's'} ready` : 'Groq API usage is billed to the site owner.'}</p><button className="primary-button" onClick={runAll} disabled={!jobs.some(job => job.kind === 'audio' && (job.status === 'queued' || job.status === 'error')) || busy}>{busy ? 'Transcribing…' : doneCount ? 'Transcribe remaining' : 'Transcribe audio'} <span aria-hidden="true">↗</span></button></div>
         </div>
         <aside className="result-panel" aria-label="Transcript results">
           <div className="result-head"><div><p className="section-index">02 / RESULT</p><h3>{current ? 'Transcript' : 'Your transcript'}</h3></div>{current && <span className="ready-label">READY</span>}</div>
