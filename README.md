@@ -1,66 +1,67 @@
 # Groq Transcribe
 
-A BYOK audio-to-text workspace for transcribing recordings, optionally cleaning up punctuation and readability, converting subtitle files, and exporting transcripts as TXT, SRT, WebVTT, or JSON. Queue multiple audio files and download completed results individually or as a ZIP.
+A BYOK tool for audio transcription, subtitle conversion, and transcript export. You enter your Groq API key. Your browser sends audio straight to Groq.
 
-**Live on Vercel:** [groq-transcribe.vercel.app](https://groq-transcribe.vercel.app). The site does not need a server-side Groq key or a Blob store: each user enters their own Groq API key, and the browser sends requests directly to Groq.
+**Live site:** [groq-transcribe.vercel.app](https://groq-transcribe.vercel.app)
 
-## What it does
+## Features
 
-- Accepts MP3, MP4, MPEG, M4A, WAV, WebM, OGG, and FLAC audio up to **200 MiB per file**
-- Sends audio directly from the browser to Groq using the key entered by the user; no transcription API route, server-side API key, or temporary Blob upload
-- Sends files up to 20 MiB as one request; larger files are converted in the browser to eight-minute, mono 16 kHz FLAC chunks, then sent directly to Groq one chunk at a time
-- Combines chunk transcripts and offsets timestamps back onto the original recording timeline
-- Uses Groq's `whisper-large-v3-turbo` model and the same user-provided key for optional cleanup (`llama-3.3-70b-versatile`)
-- Converts SRT and WebVTT cues locally in the browser, preserving timestamps
-- Exports TXT, SRT, WebVTT, or JSON and downloads one result or a completed batch as a ZIP
+- MP3, MP4, MPEG, M4A, WAV, WebM, OGG, and FLAC audio, up to 200 MiB per file
+- Direct Groq transcription with `whisper-large-v3-turbo` and your key
+- Browser-side eight-minute mono 16 kHz FLAC chunks for files over 20 MiB
+- Combined transcript text and timestamps
+- Optional Groq transcript cleanup with `llama-3.3-70b-versatile`
+- Local SRT and WebVTT conversion
+- TXT, SRT, WebVTT, and JSON exports, plus ZIP download
+- Optional custom filenames for SRT and WebVTT files
 
 ## Groq limits
 
-Groq currently documents direct speech-to-text request limits of **25 MB on the free tier** and **100 MB on the developer tier**, with a 100 MB model maximum. This app conservatively chunks files larger than 20 MiB so each FLAC segment remains under the documented free-tier size cap. Groq account quotas, audio-second limits, and rate limits still apply to every chunk. See [Groq's speech-to-text documentation](https://console.groq.com/docs/speech-to-text) for current limits.
+Groq documents a 25 MB speech-to-text request limit on the free tier and 100 MB on the developer tier. The model limit is 100 MB. This app chunks files above 20 MiB to keep each FLAC request under the free-tier limit. Groq account quotas and rate limits apply to every request. Check the [Groq speech-to-text docs](https://console.groq.com/docs/speech-to-text) for current limits.
 
-## Setup and local development
+## Run locally
 
-Requirements: Node.js 20.9+ and a Groq API key from [Groq Console](https://console.groq.com/keys).
+Requirements: Node.js 20.9 or newer and a Groq API key from [Groq Console](https://console.groq.com/keys).
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), paste your key into the key field, and select audio. The key is held in tab memory only; it is not written to local storage, sent to the app's server, or included in server environment variables. Refreshing or closing the tab clears it.
+Open [http://localhost:3000](http://localhost:3000). Paste your key in the app, then choose audio. The app keeps the key in tab memory. Refresh or close the tab to clear the key. The app does not send the key to its server or save the key in local storage.
 
-The production build copies the single-threaded FFmpeg WebAssembly runtime from `@ffmpeg/core` into the generated `public/ffmpeg/` folder. This folder is generated during the build and intentionally excluded from Git. No `GROQ_API_KEY`, Vercel Blob, or transcription-server environment variables are required.
+The build copies `@ffmpeg/core` WebAssembly files into `public/ffmpeg/`. The build creates this folder, and Git ignores the generated files. The app needs no server key, Vercel Blob store, or transcription API environment variable.
 
-## How large files work
+## Large files
 
-The former 4 MB ceiling was caused by Vercel Functions' request-body limit: audio posted to a server route had to pass through that limit. The BYOK app removes that route. Audio and the `Authorization` header are sent from the user's browser straight to `https://api.groq.com/openai/v1/audio/transcriptions`, so Vercel's 4 MB function limit no longer applies.
+The old 4 MB cap came from Vercel Function request limits. This app sends audio from your browser to Groq. Audio does not pass through a Vercel Function, so the Vercel cap no longer applies.
 
-Groq still limits the size of each transcription request. For files over 20 MiB, this app loads FFmpeg WebAssembly in the browser, converts the audio locally to mono 16 kHz FLAC segments of eight minutes, and posts each segment directly to Groq. Segment timestamps are offset and combined in the browser. Files are processed sequentially to reduce browser memory pressure. A 100–200 MiB source file can use substantial browser memory and CPU during conversion; desktop browsers are recommended for the largest files. No audio staging or temporary file is created in Vercel Blob.
+Groq still limits each request. Files over 20 MiB are converted in your browser to eight-minute mono 16 kHz FLAC chunks. Your browser sends each chunk to Groq and combines timestamps into one timeline. The app processes files one at a time to limit memory use. A 100 to 200 MiB recording uses extra browser memory and CPU during conversion. Use a desktop browser for large recordings. Vercel Blob does not store audio.
 
-## BYOK key handling and privacy
+## Key handling and privacy
 
-- The Groq key is entered by each user and kept only in the current page's JavaScript memory. The app does not persist it.
-- The browser sends the key and audio to Groq over HTTPS. The app's server does not receive either through a transcription endpoint.
-- Any script executing in the page can technically access a key while the page is open. Only enter a key if you trust the site; revoke it in Groq Console if it may have been exposed.
-- Groq processes the audio and optional cleanup text under the key owner's plan and current Groq terms, retention, and rate limits.
-- Transcript results remain in browser memory and are cleared on refresh or close. Downloads are created by the browser.
+- You enter your own Groq API key. The app keeps the key in page memory and does not save the key.
+- Your browser sends the key and audio to Groq over HTTPS.
+- Scripts on this site access the key while the page stays open. Enter a key only when you trust the site. Revoke an exposed key in Groq Console.
+- Groq handles audio and optional cleanup text under its terms, retention settings, plan, and rate limits.
+- Browser memory holds transcripts until refresh or close. Your browser creates downloads.
 
-Read the draft [Privacy Policy](/privacy) and [Terms of Service](/terms); operator contact details and applicable legal terms still need review.
+Review the draft [Privacy Policy](/privacy) and [Terms of Service](/terms). Add operator contact details and final legal terms before launch.
 
 ## Third-party software
 
-Large-file preprocessing uses `@ffmpeg/ffmpeg` and the `@ffmpeg/core` WebAssembly runtime. `@ffmpeg/ffmpeg` is MIT-licensed; `@ffmpeg/core` is GPL-2.0-or-later. Review the runtime's licensing and source-distribution obligations before distributing or operating the production app. FFmpeg source and licensing information: [ffmpeg.wasm](https://github.com/ffmpegwasm/ffmpeg.wasm) and [FFmpeg](https://ffmpeg.org/legal.html).
+Large-file conversion uses `@ffmpeg/ffmpeg` and `@ffmpeg/core`. `@ffmpeg/ffmpeg` uses the MIT license. `@ffmpeg/core` uses GPL-2.0-or-later. Review the source and distribution requirements before release. See [ffmpeg.wasm](https://github.com/ffmpegwasm/ffmpeg.wasm) and [FFmpeg licensing](https://ffmpeg.org/legal.html).
 
-## Project commands
+## Commands
 
 ```bash
-npm run dev      # local development
-npm run build    # copy FFmpeg assets and create production build
-npm run start    # serve the production build
-npm run lint     # lint source files
-npm audit        # dependency vulnerability check
+npm run dev      # start local development
+npm run build    # copy FFmpeg assets and build the app
+npm run start    # run the production build
+npm run lint     # check source files
+npm audit        # check dependencies
 ```
 
 ## License
 
-No license has been provided for this repository. All rights reserved unless the repository owner adds a license. See the third-party software section for the FFmpeg runtime's separate license.
+This repository has no license. All rights reserved unless the owner adds one. See the third-party software section for FFmpeg runtime licenses.

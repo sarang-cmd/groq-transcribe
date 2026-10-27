@@ -7,7 +7,7 @@ type Segment = { start: number; end: number; text: string };
 type Job = {
   id: string; file: File; kind: 'audio' | 'subtitle'; status: 'queued' | 'preparing' | 'working' | 'done' | 'error';
   progress?: number; phase?: string; text?: string; segments?: Segment[]; duration?: number | null; language?: string | null;
-  enhanced?: boolean; error?: string;
+  enhanced?: boolean; error?: string; renameOutput?: boolean; outputName?: string;
 };
 type Format = 'txt' | 'srt' | 'vtt' | 'json';
 type Transcription = { text: string; segments: Segment[]; duration: number | null; language: string | null; enhanced: boolean };
@@ -54,7 +54,13 @@ function parseSubtitle(source: string): Segment[] {
   });
 }
 function sizeLabel(bytes: number) { return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }
-function stem(name: string) { return name.replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_'); }
+function stem(name: string) { return name.replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_').trim() || 'transcript'; }
+function cleanOutputName(name: string) { return name.trim().replace(/\.(srt|vtt|txt|json)$/i, '').replace(/[\\/:*?"<>|]/g, '_').trim() || 'transcript'; }
+function exportFilename(job: Job, format: Format) {
+  const useCustomName = (format === 'srt' || format === 'vtt') && job.renameOutput;
+  const filename = useCustomName ? cleanOutputName(job.outputName || stem(job.file.name)) : stem(job.file.name);
+  return `${filename}.${format}`;
+}
 
 async function groqRequest(path: string, apiKey: string, body: BodyInit, contentType?: string) {
   const headers = new Headers({ Authorization: `Bearer ${apiKey}` });
@@ -64,7 +70,7 @@ async function groqRequest(path: string, apiKey: string, body: BodyInit, content
   try { data = await response.json() as GroqPayload; } catch { /* handled below */ }
   if (!response.ok) {
     const providerMessage = typeof data?.error?.message === 'string' ? data.error.message : '';
-    const message = response.status === 401 ? 'Groq rejected this key. Check it in the key field and try again.'
+    const message = response.status === 401 ? 'Groq rejected this key. Check the key field and try again.'
       : response.status === 413 ? 'Groq rejected this audio size. This chunk should fit the documented limit; try again or check your Groq plan.'
       : response.status === 429 ? 'Groq rate limit or audio quota reached. Wait a little or review your Groq account limits.'
       : providerMessage || `Groq returned an error (${response.status}).`;
@@ -149,7 +155,7 @@ async function transcribeChunked(
       return { name, start: Number(start), end: Number(end) };
     });
     if (!entries.length || entries.some(entry => !Number.isFinite(entry.start) || !Number.isFinite(entry.end))) {
-      throw new Error('Could not split this recording into audio chunks.');
+      throw new Error('Audio chunking failed. Try a supported audio file.');
     }
     const results: Transcription[] = [];
     let prompt = '';
@@ -210,7 +216,7 @@ export default function Home() {
           const segments = parseSubtitle(await file.text());
           if (!segments.length) { problems.push(`${file.name}: no valid SRT or WebVTT cues found`); continue; }
           valid.push({ id, file, kind: 'subtitle', status: 'done', segments, text: segments.map(segment => segment.text).join(' '), duration: segments.at(-1)?.end });
-        } catch { problems.push(`${file.name}: could not read subtitle file`); }
+        } catch { problems.push(`${file.name}: Unable to read subtitle file`); }
       } else valid.push({ id, file, kind: 'audio', status: 'queued' });
     }
     if (valid.length) { setJobs(current => [...current, ...valid]); setNotice(''); }
@@ -239,7 +245,7 @@ export default function Home() {
       setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'done', text: result.text, segments: result.segments, duration: result.duration, language: result.language, enhanced: result.enhanced, phase: undefined, progress: undefined } : item));
     } catch (error) {
       const message = error instanceof TypeError
-        ? 'The browser could not complete a direct request to Groq. Check your connection, CORS access, or browser privacy extensions, then retry.'
+        ? 'Groq did not respond to the browser request. Check your connection, CORS access, or browser privacy extensions, then retry.'
         : error instanceof Error ? error.message : 'Something went wrong. Please try again.';
       setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'error', error: message, phase: undefined, progress: undefined } : item));
     }
@@ -253,18 +259,32 @@ export default function Home() {
   function download(job: Job, as = format) {
     if (as !== 'txt' && !job.segments?.length && as !== 'json') { setNotice('This transcription did not include timestamped segments. Try TXT or JSON.'); return; }
     const blob = new Blob([output(job, as)], { type: as === 'json' ? 'application/json' : as === 'txt' ? 'text/plain' : 'text/plain;charset=utf-8' });
-    const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${stem(job.file.name)}.${as}`; link.click(); URL.revokeObjectURL(link.href);
+    const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = exportFilename(job, as); link.click(); URL.revokeObjectURL(link.href);
   }
   async function downloadAll() {
     const complete = jobs.filter(job => job.status === 'done');
     if (!complete.length) return;
     const zip = new JSZip();
-    for (const job of complete) zip.file(`${stem(job.file.name)}.${format}`, output(job, format));
+    const usedNames = new Set<string>();
+    for (const job of complete) {
+      const originalName = exportFilename(job, format);
+      const extension = `.${format}`;
+      const base = originalName.slice(0, -extension.length);
+      let filename = originalName;
+      let suffix = 2;
+      while (usedNames.has(filename.toLowerCase())) filename = `${base} (${suffix++})${extension}`;
+      usedNames.add(filename.toLowerCase());
+      zip.file(filename, output(job, format));
+    }
     const blob = await zip.generateAsync({ type: 'blob' });
     const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `groq-transcribe-${format}-exports.zip`; link.click(); URL.revokeObjectURL(link.href);
   }
   function remove(id: string) { setJobs(current => current.filter(job => job.id !== id)); if (active === id) setActive(null); }
   function updateText(id: string, text: string) { setJobs(current => current.map(job => job.id === id ? { ...job, text } : job)); }
+  function toggleRename(id: string, enabled: boolean) {
+    setJobs(current => current.map(job => job.id === id ? { ...job, renameOutput: enabled, outputName: enabled ? job.outputName || stem(job.file.name) : job.outputName } : job));
+  }
+  function updateOutputName(id: string, outputName: string) { setJobs(current => current.map(job => job.id === id ? { ...job, outputName } : job)); }
   const current = jobs.find(job => job.id === active) || jobs.find(job => job.status === 'done');
 
   return <main>
@@ -317,7 +337,7 @@ export default function Home() {
         <aside className="result-panel" aria-label="Transcript results">
           <div className="result-head"><div><p className="section-index">02 / RESULT</p><h3>{current ? 'Transcript' : 'Your transcript'}</h3></div>{current && <span className="ready-label">READY</span>}</div>
           {!current ? <div className="result-empty"><div className="paper-icon" aria-hidden="true"><span/><span/><span/></div><p>Your transcript will appear here, ready to review and export.</p><small>No sample text. Your own recording is the preview.</small></div> : <div className="transcript-view"><p className="transcript-file">{current.file.name}{current.enhanced && <span> CLEANED UP</span>}</p><textarea aria-label={`Transcript for ${current.file.name}`} value={current.text || ''} onChange={event => updateText(current.id, event.target.value)} spellCheck />{current.language && <small className="detected-language">Detected language: {current.language}</small>}<button className="copy-button" onClick={() => navigator.clipboard?.writeText(current.text || '')}>Copy transcript</button></div>}
-          <div className="export-box" id="exports"><label htmlFor="format-select">Export as</label><div className="export-controls"><select id="format-select" value={format} onChange={event => setFormat(event.target.value as Format)}><option value="srt">SubRip subtitle (.srt)</option><option value="vtt">WebVTT subtitle (.vtt)</option><option value="txt">Plain text (.txt)</option><option value="json">JSON with timestamps (.json)</option></select><button className="download-button" disabled={!current} onClick={() => current && download(current)}>Download</button></div><button className="batch-link" disabled={!doneCount} onClick={downloadAll}>↓ Download all {doneCount > 0 ? `${doneCount} files` : 'files'} as ZIP</button><p>Subtitle exports keep cue timing from the source file.</p></div>
+          <div className="export-box" id="exports"><label htmlFor="format-select">Export as</label><div className="export-controls"><select id="format-select" value={format} onChange={event => setFormat(event.target.value as Format)}><option value="srt">SubRip subtitle (.srt)</option><option value="vtt">WebVTT subtitle (.vtt)</option><option value="txt">Plain text (.txt)</option><option value="json">JSON with timestamps (.json)</option></select><button className="download-button" disabled={!current} onClick={() => current && download(current)}>Download</button></div>{current && (format === 'srt' || format === 'vtt') && <><label className="rename-toggle"><input type="checkbox" checked={Boolean(current.renameOutput)} onChange={event => toggleRename(current.id, event.target.checked)}/><span>Rename subtitle file</span></label>{current.renameOutput && <label className="rename-field" htmlFor={`subtitle-name-${current.id}`}><span>File name, without extension</span><input id={`subtitle-name-${current.id}`} value={current.outputName ?? stem(current.file.name)} onChange={event => updateOutputName(current.id, event.target.value)} maxLength={120}/></label>}</>}<button className="batch-link" disabled={!doneCount} onClick={downloadAll}>↓ Download all {doneCount > 0 ? `${doneCount} files` : 'files'} as ZIP</button><p>Subtitle exports keep cue timing from the source file.</p></div>
         </aside>
       </div>
       <p className="privacy-note"><span aria-hidden="true">⌑</span> Audio and your key go directly from this browser to Groq. The key is kept in tab memory only. Files over 20 MB are split in this browser before their chunks are sent to Groq.</p>
@@ -325,9 +345,15 @@ export default function Home() {
 
     <section className="workflow" id="how-it-works">
       <div className="workflow-title"><p className="section-index">A SMALL, COMPLETE WORKFLOW</p><h2>From recording<br/>to ready-to-use.</h2></div>
-      <div className="workflow-steps"><article><span>01</span><h3>Bring your audio</h3><p>Add recordings up to 200 MB or convert an existing SRT or WebVTT file in your browser.</p></article><article><span>02</span><h3>Get a readable transcript</h3><p>Groq turns speech into text. Optional cleanup improves punctuation while keeping subtitle timing attached to each segment.</p></article><article><span>03</span><h3>Take it with you</h3><p>Export an SRT or WebVTT subtitle, plain text, or timestamped JSON. Download one result or package the batch together.</p></article></div>
+      <div className="workflow-steps"><article><span>01</span><h3>Bring your audio</h3><p>Add recordings up to 200 MB or convert an existing SRT or WebVTT file in your browser.</p></article><article><span>02</span><h3>Get a readable transcript</h3><p>Groq turns speech into text. Optional cleanup improves punctuation while keeping subtitle timing attached to each segment.</p></article><article><span>03</span><h3>Export your transcript</h3><p>Export an SRT or WebVTT subtitle, plain text, or timestamped JSON. Download one result or package the batch together.</p></article></div>
     </section>
 
-    <footer id="footer"><a className="brand footer-brand" href="#top"><span className="brand-mark" aria-hidden="true"><i/><i/><i/><i/><i/></span><span>groq<span className="brand-light">transcribe</span></span></a><p>Audio, made readable.</p><div className="footer-links"><a href="/terms">Terms of Service</a><a href="/privacy">Privacy Policy</a><a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get a Groq API key ↗</a></div><span className="copyright">© 2026 Groq Transcribe</span></footer>
+    <footer id="footer">
+      <a className="brand footer-brand" href="#top"><span className="brand-mark" aria-hidden="true"><i/><i/><i/><i/><i/></span><span>groq<span className="brand-light">transcribe</span></span></a>
+      <div className="footer-about"><p className="footer-credit">Made by Sarang</p><p className="footer-description">Browser-based transcription and subtitle exports. Audio goes straight from your browser to Groq.</p></div>
+      <nav className="footer-socials" aria-label="Social and project links"><a href="https://github.com/sarang-cmd" target="_blank" rel="noreferrer">GitHub ↗</a><a href="https://github.com/sarang-cmd/groq-transcribe" target="_blank" rel="noreferrer">Source code ↗</a></nav>
+      <div className="footer-links"><a href="/terms">Terms of Service</a><a href="/privacy">Privacy Policy</a><a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get a Groq API key ↗</a></div>
+      <span className="copyright">© 2026 Groq Transcribe</span>
+    </footer>
   </main>;
 }
