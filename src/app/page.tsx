@@ -348,6 +348,12 @@ export default function Home() {
       <div className="workflow-steps"><article><span>01</span><h3>Bring your audio</h3><p>Add recordings up to 200 MB or convert an existing SRT or WebVTT file in your browser.</p></article><article><span>02</span><h3>Get a readable transcript</h3><p>Groq turns speech into text. Optional cleanup improves punctuation while keeping subtitle timing attached to each segment.</p></article><article><span>03</span><h3>Export your transcript</h3><p>Export an SRT or WebVTT subtitle, plain text, or timestamped JSON. Download one result or package the batch together.</p></article></div>
     </section>
 
-    <footer id="footer"><a className="brand footer-brand" href="#top"><span className="brand-mark" aria-hidden="true"><i/><i/><i/><i/><i/></span><span>groq<span className="brand-light">transcribe</span></span></a><p>Audio, made readable.</p><div className="footer-links"><a href="/terms">Terms of Service</a><a href="/privacy">Privacy Policy</a><a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get a Groq API key ↗</a></div><span className="copyright">© 2026 Groq Transcribe</span></footer>
+    <footer id="footer">
+      <a className="brand footer-brand" href="#top"><span className="brand-mark" aria-hidden="true"><i/><i/><i/><i/><i/></span><span>groq<span className="brand-light">transcribe</span></span></a>
+      <div className="footer-about"><p className="footer-credit">Made by Sarang</p><p className="footer-description">Browser-based transcription and subtitle exports. Audio goes straight from your browser to Groq.</p></div>
+      <nav className="footer-socials" aria-label="Social and project links"><a href="https://github.com/sarang-cmd" target="_blank" rel="noreferrer">GitHub ↗</a><a href="https://github.com/sarang-cmd/groq-transcribe" target="_blank" rel="noreferrer">Source code ↗</a></nav>
+      <div className="footer-links"><a href="/terms">Terms of Service</a><a href="/privacy">Privacy Policy</a><a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get a Groq API key ↗</a></div>
+      <span className="copyright">© 2026 Groq Transcribe</span>
+    </footer>
   </main>;
 }
