@@ -1,3 +1,3 @@
 import type { NextConfig } from 'next';
-const nextConfig: NextConfig = { serverExternalPackages: ['jszip', '@ffmpeg-installer/ffmpeg'] };
+const nextConfig: NextConfig = {};
 export default nextConfig;
