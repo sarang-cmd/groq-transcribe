@@ -2,6 +2,8 @@
 
 A focused audio-to-text workspace for transcribing recordings, optionally cleaning up punctuation and readability, and exporting transcripts as TXT, timestamped SRT/VTT subtitles, or JSON. Multiple files can be queued, transcribed in small concurrent batches, and downloaded together as a ZIP.
 
+**Live on Vercel:** [groq-transcribe.vercel.app](https://groq-transcribe.vercel.app). The workspace is deployed, but transcription requires the owner to configure `GROQ_API_KEY` in the Vercel project settings first.
+
 ## What it does
 
 - Accepts MP3, MP4, MPEG, M4A, WAV, WebM, OGG, and FLAC files
