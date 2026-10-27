@@ -13,7 +13,8 @@ A BYOK tool for audio transcription, subtitle conversion, and transcript export.
 - Optional Groq transcript cleanup with `llama-3.3-70b-versatile`
 - Local SRT and WebVTT conversion
 - TXT, SRT, WebVTT, and JSON exports, plus ZIP download
-- Optional custom filenames for SRT and WebVTT files
+- AI-suggested or custom filenames for SRT and WebVTT exports
+- AI filename requests send up to 6,000 transcript characters to Groq after you choose Name with AI
 
 ## Groq limits
 
