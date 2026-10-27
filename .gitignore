@@ -5,3 +5,6 @@ out
 !.env.example
 .vercel
 .DS_Store
+
+# Generated from @ffmpeg/core during the production build
+/public/ffmpeg/

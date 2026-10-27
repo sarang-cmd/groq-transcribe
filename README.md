@@ -1,91 +1,61 @@
 # Groq Transcribe
 
-A focused audio-to-text workspace for transcribing recordings, optionally cleaning up punctuation and readability, converting subtitle files, and exporting transcripts as TXT, SRT, WebVTT, or JSON. Queue multiple audio files, follow direct-upload progress, and download completed results individually or as a ZIP.
+A BYOK audio-to-text workspace for transcribing recordings, optionally cleaning up punctuation and readability, converting subtitle files, and exporting transcripts as TXT, SRT, WebVTT, or JSON. Queue multiple audio files and download completed results individually or as a ZIP.
 
-**Live on Vercel:** [groq-transcribe.vercel.app](https://groq-transcribe.vercel.app). Add `GROQ_API_KEY` and connect a private Blob store to enable audio transcription and large uploads.
+**Live on Vercel:** [groq-transcribe.vercel.app](https://groq-transcribe.vercel.app). The site does not need a server-side Groq key or a Blob store: each user enters their own Groq API key, and the browser sends requests directly to Groq.
 
 ## What it does
 
-- Accepts MP3, MP4, MPEG, M4A, WAV, WebM, OGG, and FLAC audio up to **200 MB per file**
-- Uploads files over 4 MB directly from the browser to private Vercel Blob storage, using multipart transfers for files over 100 MB
-- Normalizes large recordings into eight-minute, mono 16 kHz FLAC segments before sending them to Groq; timestamps are offset and combined into one transcript
-- Transcribes with Groq's `whisper-large-v3-turbo` model and uses the same server-side `GROQ_API_KEY` for optional cleanup (`llama-3.3-70b-versatile`)
-- Converts SRT and WebVTT cues locally in the browser, preserving their timestamps
-- Exports TXT, SRT, WebVTT, or JSON and downloads one result or the completed batch as a ZIP
+- Accepts MP3, MP4, MPEG, M4A, WAV, WebM, OGG, and FLAC audio up to **200 MiB per file**
+- Sends audio directly from the browser to Groq using the key entered by the user; no transcription API route, server-side API key, or temporary Blob upload
+- Sends files up to 20 MiB as one request; larger files are converted in the browser to eight-minute, mono 16 kHz FLAC chunks, then sent directly to Groq one chunk at a time
+- Combines chunk transcripts and offsets timestamps back onto the original recording timeline
+- Uses Groq's `whisper-large-v3-turbo` model and the same user-provided key for optional cleanup (`llama-3.3-70b-versatile`)
+- Converts SRT and WebVTT cues locally in the browser, preserving timestamps
+- Exports TXT, SRT, WebVTT, or JSON and downloads one result or a completed batch as a ZIP
 
-## Setup
+## Groq limits
 
-Requirements: Node.js 20.9+ and a Groq API key. A private Vercel Blob store is also required for audio files over 4 MB.
+Groq currently documents direct speech-to-text request limits of **25 MB on the free tier** and **100 MB on the developer tier**, with a 100 MB model maximum. This app conservatively chunks files larger than 20 MiB so each FLAC segment remains under the documented free-tier size cap. Groq account quotas, audio-second limits, and rate limits still apply to every chunk. See [Groq's speech-to-text documentation](https://console.groq.com/docs/speech-to-text) for current limits.
+
+## Setup and local development
+
+Requirements: Node.js 20.9+ and a Groq API key from [Groq Console](https://console.groq.com/keys).
 
 ```bash
 npm install
-cp .env.example .env.local
-```
-
-Add your Groq key to `.env.local`:
-
-```dotenv
-GROQ_API_KEY=gsk_...
-```
-
-Keep the key private. Do not commit `.env.local`, put the key in `NEXT_PUBLIC_*`, or enter it into client-side code.
-
-### Local development with large uploads
-
-Connect a private Blob store to the Vercel project, include the Development environment, and pull its auto-generated environment variables into `.env.local`:
-
-```bash
-vercel link
-vercel env pull .env.local
-```
-
-The Blob store provides `BLOB_STORE_ID` and `BLOB_READ_WRITE_TOKEN`. Vercel rotates its OIDC credentials automatically for deployed functions. The project uses the read-write token only for the browser upload-token route.
-
-```bash
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). Without Blob credentials, files up to 4 MB still use the direct route; larger files show a setup error.
+Open [http://localhost:3000](http://localhost:3000), paste your key into the key field, and select audio. The key is held in tab memory only; it is not written to local storage, sent to the app's server, or included in server environment variables. Refreshing or closing the tab clears it.
 
-## Deploy to Vercel
+The production build copies the single-threaded FFmpeg WebAssembly runtime from `@ffmpeg/core` into the generated `public/ffmpeg/` folder. This folder is generated during the build and intentionally excluded from Git. No `GROQ_API_KEY`, Vercel Blob, or transcription-server environment variables are required.
 
-1. Import this GitHub repository in Vercel and select **Next.js**.
-2. Add `GROQ_API_KEY` as a server-side environment variable. Create a key in [Groq Console](https://console.groq.com/keys).
-3. In the Vercel project, open **Storage → Create Storage → Blob**. Choose **Private**, connect the store to Production, Preview, and Development as needed, then redeploy. Vercel adds the required Blob environment variables to the project.
-4. Confirm the deployment has the Blob variables and test with a non-sensitive recording before sharing the site.
+## How large files work
 
-No Groq key is stored in this repository. Without `GROQ_API_KEY`, audio transcription returns a configuration error. Without a connected private Blob store, uploads above 4 MB are rejected with a setup message.
+The former 4 MB ceiling was caused by Vercel Functions' request-body limit: audio posted to a server route had to pass through that limit. The BYOK app removes that route. Audio and the `Authorization` header are sent from the user's browser straight to `https://api.groq.com/openai/v1/audio/transcriptions`, so Vercel's 4 MB function limit no longer applies.
 
-## Large-file processing and limits
+Groq still limits the size of each transcription request. For files over 20 MiB, this app loads FFmpeg WebAssembly in the browser, converts the audio locally to mono 16 kHz FLAC segments of eight minutes, and posts each segment directly to Groq. Segment timestamps are offset and combined in the browser. Files are processed sequentially to reduce browser memory pressure. A 100–200 MiB source file can use substantial browser memory and CPU during conversion; desktop browsers are recommended for the largest files. No audio staging or temporary file is created in Vercel Blob.
 
-Vercel Functions reject request bodies above approximately 4.5 MB, so large recordings are uploaded directly from the browser to a **private** Blob store, rather than sent through an API route. Files above 100 MB use Blob multipart upload. The server then reads the private blob, converts it with FFmpeg to mono 16 kHz FLAC chunks of eight minutes, and sends those chunks to Groq one at a time. This stays below Groq's per-request audio limits and combines timestamps back into the original recording timeline. Temporary blobs are deleted after processing completes; if the browser closes after upload but before processing starts, the orphaned blob may need to be removed from the Vercel Storage dashboard.
+## BYOK key handling and privacy
 
-Each audio file is capped at 200 MB. Large audio processing uses temporary disk and a Vercel function that can run for up to five minutes. The user's Groq plan still controls rate limits and billing. Large transcripts may therefore take longer or be rejected by Groq if the account reaches its audio quota.
+- The Groq key is entered by each user and kept only in the current page's JavaScript memory. The app does not persist it.
+- The browser sends the key and audio to Groq over HTTPS. The app's server does not receive either through a transcription endpoint.
+- Any script executing in the page can technically access a key while the page is open. Only enter a key if you trust the site; revoke it in Groq Console if it may have been exposed.
+- Groq processes the audio and optional cleanup text under the key owner's plan and current Groq terms, retention, and rate limits.
+- Transcript results remain in browser memory and are cleared on refresh or close. Downloads are created by the browser.
 
-## Data flow
+Read the draft [Privacy Policy](/privacy) and [Terms of Service](/terms); operator contact details and applicable legal terms still need review.
 
-1. Audio up to 4 MB is submitted to `/api/transcribe`.
-2. Larger audio goes directly from the browser to a private Vercel Blob store via a short-lived upload token.
-3. The server validates the Blob URL and size, processes larger audio into timestamp-aligned chunks, and calls Groq using the server-side API key.
-4. The temporary Blob is deleted after the transcription request completes. Results and editable transcript text remain in browser memory; exports are generated in the browser.
-5. SRT and WebVTT conversion stays entirely in the browser and does not call Groq.
+## Third-party software
 
-Groq processes audio and optional transcript text. Vercel temporarily handles large audio uploads. Hosting-provider logs and Groq's retention practices are governed by their current settings and policies. Review both before processing sensitive recordings. See the draft [Privacy Policy](/privacy) and [Terms of Service](/terms); operator and contact details still need review.
-
-**Access warning:** this prototype has no user accounts or durable rate limiting. Anyone who can reach the deployed site can upload files and use the operator's configured Groq account. Groq usage and temporary Blob storage are billed to the account owner. Add access control or a rate-limiting service before broadly sharing the public URL.
-
-## Output details
-
-- **TXT** exports the editable transcript text.
-- **SRT** and **WebVTT** export timestamped segments. Cleanup is applied segment-by-segment where possible. Existing SRT and WebVTT files can be converted directly in the browser, preserving cue timing. Manual transcript edits do not alter timestamped subtitle exports.
-- **JSON** includes transcript text and timestamped segment data.
-- ZIP filenames are derived from uploaded filenames. Duplicate files with the same name and size are ignored in the same queue.
+Large-file preprocessing uses `@ffmpeg/ffmpeg` and the `@ffmpeg/core` WebAssembly runtime. `@ffmpeg/ffmpeg` is MIT-licensed; `@ffmpeg/core` is GPL-2.0-or-later. Review the runtime's licensing and source-distribution obligations before distributing or operating the production app. FFmpeg source and licensing information: [ffmpeg.wasm](https://github.com/ffmpegwasm/ffmpeg.wasm) and [FFmpeg](https://ffmpeg.org/legal.html).
 
 ## Project commands
 
 ```bash
 npm run dev      # local development
-npm run build    # production build and type validation
+npm run build    # copy FFmpeg assets and create production build
 npm run start    # serve the production build
 npm run lint     # lint source files
 npm audit        # dependency vulnerability check
@@ -93,4 +63,4 @@ npm audit        # dependency vulnerability check
 
 ## License
 
-No license has been provided for this repository. All rights reserved unless the repository owner adds a license.
+No license has been provided for this repository. All rights reserved unless the repository owner adds a license. See the third-party software section for the FFmpeg runtime's separate license.

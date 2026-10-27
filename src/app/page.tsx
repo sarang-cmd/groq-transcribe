@@ -1,20 +1,27 @@
 'use client';
 
 import { ChangeEvent, DragEvent, useRef, useState } from 'react';
-import { upload } from '@vercel/blob/client';
 import JSZip from 'jszip';
 
 type Segment = { start: number; end: number; text: string };
 type Job = {
-  id: string; file: File; kind: 'audio' | 'subtitle'; status: 'queued' | 'uploading' | 'working' | 'done' | 'error';
-  uploadProgress?: number; text?: string; segments?: Segment[]; duration?: number | null; language?: string | null;
+  id: string; file: File; kind: 'audio' | 'subtitle'; status: 'queued' | 'preparing' | 'working' | 'done' | 'error';
+  progress?: number; phase?: string; text?: string; segments?: Segment[]; duration?: number | null; language?: string | null;
   enhanced?: boolean; error?: string;
 };
 type Format = 'txt' | 'srt' | 'vtt' | 'json';
+type Transcription = { text: string; segments: Segment[]; duration: number | null; language: string | null; enhanced: boolean };
+type GroqPayload = {
+  text?: unknown; segments?: unknown; duration?: unknown; language?: unknown;
+  error?: { message?: unknown };
+  choices?: Array<{ message?: { content?: unknown } }>;
+};
 const ACCEPT = '.mp3,.mp4,.mpeg,.mpga,.m4a,.wav,.webm,.ogg,.oga,.flac,.srt,.vtt';
 const MAX_AUDIO_BYTES = 200 * 1024 * 1024;
 const MAX_SUBTITLE_BYTES = 4 * 1024 * 1024;
-const DIRECT_UPLOAD_BYTES = 4 * 1024 * 1024;
+const CHUNK_THRESHOLD_BYTES = 20 * 1024 * 1024;
+const CHUNK_SECONDS = 8 * 60;
+const GROQ_API = 'https://api.groq.com/openai/v1';
 
 function stamp(seconds: number, comma = true) {
   const ms = Math.max(0, Math.floor(seconds * 1000));
@@ -49,9 +56,134 @@ function parseSubtitle(source: string): Segment[] {
 function sizeLabel(bytes: number) { return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }
 function stem(name: string) { return name.replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_'); }
 
+async function groqRequest(path: string, apiKey: string, body: BodyInit, contentType?: string) {
+  const headers = new Headers({ Authorization: `Bearer ${apiKey}` });
+  if (contentType) headers.set('Content-Type', contentType);
+  const response = await fetch(`${GROQ_API}${path}`, { method: 'POST', headers, body });
+  let data: GroqPayload | null = null;
+  try { data = await response.json() as GroqPayload; } catch { /* handled below */ }
+  if (!response.ok) {
+    const providerMessage = typeof data?.error?.message === 'string' ? data.error.message : '';
+    const message = response.status === 401 ? 'Groq rejected this key. Check it in the key field and try again.'
+      : response.status === 413 ? 'Groq rejected this audio size. This chunk should fit the documented limit; try again or check your Groq plan.'
+      : response.status === 429 ? 'Groq rate limit or audio quota reached. Wait a little or review your Groq account limits.'
+      : providerMessage || `Groq returned an error (${response.status}).`;
+    throw new Error(message);
+  }
+  return data;
+}
+
+function transcriptionForm(file: File, language: string, prompt = '') {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  form.append('model', 'whisper-large-v3-turbo');
+  form.append('response_format', 'verbose_json');
+  form.append('timestamp_granularities[]', 'segment');
+  if (language && language !== 'auto') form.append('language', language);
+  if (prompt) form.append('prompt', prompt.slice(-800));
+  return form;
+}
+
+function normalize(data: GroqPayload | null): Transcription {
+  return {
+    text: typeof data?.text === 'string' ? data.text : '',
+    segments: Array.isArray(data?.segments) ? data.segments as Segment[] : [],
+    duration: typeof data?.duration === 'number' ? data.duration : null,
+    language: typeof data?.language === 'string' ? data.language : null,
+    enhanced: false,
+  };
+}
+
+async function cleanSegments(result: Transcription, apiKey: string): Promise<Transcription> {
+  if (!result.text.trim() || !result.segments.length) return result;
+  let cleanedAny = false;
+  for (let offset = 0; offset < result.segments.length; offset += 30) {
+    const group = result.segments.slice(offset, offset + 30);
+    try {
+      const body = JSON.stringify({
+        model: 'llama-3.3-70b-versatile', temperature: 0.1, max_tokens: 3000,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: 'Improve readability of each speech transcript segment with punctuation, capitalization, and obvious transcription corrections. Keep exactly the same meaning, language, names, order, and number of segments. Never summarize or add content. Reply as a JSON object with one "segments" array of strings, one cleaned string per input segment.' },
+          { role: 'user', content: JSON.stringify({ segments: group.map(segment => segment.text) }) },
+        ],
+      });
+      const response = await groqRequest('/chat/completions', apiKey, body, 'application/json');
+      const content = response?.choices?.[0]?.message?.content;
+      const values = typeof content === 'string' ? JSON.parse(content).segments : null;
+      if (Array.isArray(values) && values.length === group.length && values.every((value: unknown) => typeof value === 'string')) {
+        group.forEach((segment, index) => { segment.text = values[index]; });
+        cleanedAny = true;
+      }
+    } catch { /* Retain the original text if cleanup is unavailable. */ }
+  }
+  return { ...result, text: result.segments.map(segment => segment.text).join(' ').replace(/\s+/g, ' ').trim(), enhanced: cleanedAny };
+}
+
+async function transcribeChunked(
+  file: File, apiKey: string, language: string,
+  onPhase: (phase: string, progress?: number) => void,
+): Promise<Transcription> {
+  const { FFmpeg } = await import('@ffmpeg/ffmpeg');
+  const ffmpeg = new FFmpeg();
+  const onProgress = ({ progress }: { progress: number }) => onPhase('Preparing audio in this browser', Math.max(0, Math.min(100, Math.round(progress * 100))));
+  ffmpeg.on('progress', onProgress);
+  try {
+    onPhase('Loading audio tools');
+    await ffmpeg.load({ coreURL: '/ffmpeg/ffmpeg-core.js', wasmURL: '/ffmpeg/ffmpeg-core.wasm' });
+    const extension = file.name.match(/\.[a-z0-9]{1,8}$/i)?.[0]?.toLowerCase() || '.audio';
+    const inputName = `source${extension}`;
+    await ffmpeg.writeFile(inputName, new Uint8Array(await file.arrayBuffer()));
+    const listName = 'chunks.csv';
+    onPhase('Preparing audio in this browser', 0);
+    const exitCode = await ffmpeg.exec([
+      '-hide_banner', '-loglevel', 'error', '-i', inputName,
+      '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-sample_fmt', 's16', '-c:a', 'flac',
+      '-f', 'segment', '-segment_time', String(CHUNK_SECONDS), '-reset_timestamps', '1',
+      '-segment_list', listName, '-segment_list_type', 'csv', 'chunk-%03d.flac',
+    ]);
+    if (exitCode !== 0) throw new Error('Browser audio conversion failed. Try a standard MP3, WAV, M4A, or WebM file.');
+    const csv = await ffmpeg.readFile(listName, 'utf8');
+    const entries = String(csv).trim().split(/\r?\n/).filter(Boolean).map(line => {
+      const [name, start, end] = line.split(',');
+      return { name, start: Number(start), end: Number(end) };
+    });
+    if (!entries.length || entries.some(entry => !Number.isFinite(entry.start) || !Number.isFinite(entry.end))) {
+      throw new Error('Could not split this recording into audio chunks.');
+    }
+    const results: Transcription[] = [];
+    let prompt = '';
+    for (let index = 0; index < entries.length; index++) {
+      const entry = entries[index];
+      const bytes = await ffmpeg.readFile(entry.name);
+      const chunk = new File([bytes as Uint8Array<ArrayBuffer>], entry.name, { type: 'audio/flac' });
+      onPhase(`Sending chunk ${index + 1} of ${entries.length} to Groq`);
+      const response = await groqRequest('/audio/transcriptions', apiKey, transcriptionForm(chunk, language, prompt));
+      const result = normalize(response);
+      result.segments = result.segments.map(segment => ({ ...segment, start: segment.start + entry.start, end: segment.end + entry.start }));
+      result.duration = entry.end;
+      results.push(result);
+      prompt = result.text || prompt;
+      await ffmpeg.deleteFile(entry.name);
+    }
+    return {
+      text: results.map(result => result.text.trim()).filter(Boolean).join(' '),
+      segments: results.flatMap(result => result.segments),
+      duration: Math.max(...results.map(result => result.duration || 0)),
+      language: results.find(result => result.language)?.language || null,
+      enhanced: false,
+    };
+  } finally {
+    ffmpeg.off('progress', onProgress);
+    ffmpeg.terminate();
+  }
+}
+
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [apiKey, setApiKey] = useState('');
+  const [showKey, setShowKey] = useState(false);
   const [format, setFormat] = useState<Format>('srt');
   const [language, setLanguage] = useState('auto');
   const [enhance, setEnhance] = useState(true);
@@ -59,7 +191,7 @@ export default function Home() {
   const [notice, setNotice] = useState('');
   const [active, setActive] = useState<string | null>(null);
   const doneCount = jobs.filter(job => job.status === 'done').length;
-  const busy = jobs.some(job => job.status === 'working' || job.status === 'uploading');
+  const busy = jobs.some(job => job.status === 'preparing' || job.status === 'working');
 
   async function addFiles(files: FileList | File[]) {
     const incoming = Array.from(files);
@@ -89,39 +221,34 @@ export default function Home() {
 
   async function transcribe(job: Job) {
     try {
-      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'uploading', uploadProgress: 0, error: undefined } : item));
-      const configResponse = await fetch('/api/transcribe');
-      const config = await configResponse.json();
-      if (!config.transcriptionConfigured) throw new Error('The site owner needs to add GROQ_API_KEY in Vercel before audio can be transcribed.');
-      let response: Response;
-      if (job.file.size <= DIRECT_UPLOAD_BYTES) {
-        const body = new FormData(); body.append('file', job.file); body.append('language', language); body.append('enhance', String(enhance));
-        setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', uploadProgress: undefined } : item));
-        response = await fetch('/api/transcribe', { method: 'POST', body });
+      if (!apiKey.trim()) throw new Error('Add your Groq API key above before transcribing.');
+      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: item.file.size > CHUNK_THRESHOLD_BYTES ? 'preparing' : 'working', phase: item.file.size > CHUNK_THRESHOLD_BYTES ? 'Preparing audio in this browser' : 'Sending directly to Groq', progress: 0, error: undefined } : item));
+      let result: Transcription;
+      if (job.file.size > CHUNK_THRESHOLD_BYTES) {
+        result = await transcribeChunked(job.file, apiKey.trim(), language, (phase, progress) => {
+          setJobs(current => current.map(item => item.id === job.id ? { ...item, status: phase.startsWith('Sending chunk') ? 'working' : 'preparing', phase, progress } : item));
+        });
       } else {
-        if (!config.largeUploadsConfigured) throw new Error('Large uploads need a private Vercel Blob store. The owner can create one under Vercel → Storage, then redeploy.');
-        const safeName = job.file.name.replace(/[^a-z0-9_.-]/gi, '_');
-        const blob = await upload(`incoming/${crypto.randomUUID()}-${safeName}`, job.file, {
-          access: 'private', handleUploadUrl: '/api/upload', multipart: job.file.size > 100 * 1024 * 1024,
-          onUploadProgress: ({ percentage }) => setJobs(current => current.map(item => item.id === job.id ? { ...item, uploadProgress: Math.round(percentage) } : item)),
-        });
-        setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', uploadProgress: undefined } : item));
-        response = await fetch('/api/transcribe', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ blobUrl: blob.url, filename: job.file.name, language, enhance }),
-        });
+        const response = await groqRequest('/audio/transcriptions', apiKey.trim(), transcriptionForm(job.file, language));
+        result = normalize(response);
       }
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Transcription failed.');
-      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'done', text: result.text, segments: result.segments, duration: result.duration, language: result.language, enhanced: result.enhanced } : item));
+      if (enhance) {
+        setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', phase: 'Cleaning up transcript with Groq', progress: undefined } : item));
+        result = await cleanSegments(result, apiKey.trim());
+      }
+      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'done', text: result.text, segments: result.segments, duration: result.duration, language: result.language, enhanced: result.enhanced, phase: undefined, progress: undefined } : item));
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Something went wrong. Please try again.';
-      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'error', error: message, uploadProgress: undefined } : item));
+      const message = error instanceof TypeError
+        ? 'The browser could not complete a direct request to Groq. Check your connection, CORS access, or browser privacy extensions, then retry.'
+        : error instanceof Error ? error.message : 'Something went wrong. Please try again.';
+      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'error', error: message, phase: undefined, progress: undefined } : item));
     }
   }
   async function runAll() {
+    if (!apiKey.trim()) { setNotice('Add your Groq API key above before transcribing.'); return; }
     const queued = jobs.filter(job => job.kind === 'audio' && (job.status === 'queued' || job.status === 'error'));
-    for (let index = 0; index < queued.length; index += 2) await Promise.all(queued.slice(index, index + 2).map(transcribe));
+    // Process sequentially so a large WASM conversion does not compete for memory with another file.
+    for (const job of queued) await transcribe(job);
   }
   function download(job: Job, as = format) {
     if (as !== 'txt' && !job.segments?.length && as !== 'json') { setNotice('This transcription did not include timestamped segments. Try TXT or JSON.'); return; }
@@ -161,6 +288,11 @@ export default function Home() {
       <div className="studio-heading"><div><p className="section-index">01 / YOUR WORKSPACE</p><h2 id="studio-title">Start with a file.</h2><p className="section-intro">Upload one recording or a whole batch. Your files stay in this session.</p></div><span className="engine-label"><span className="engine-dot"/> GROQ AUDIO</span></div>
       <div className="studio-grid">
         <div className="work-panel">
+          <div className="key-entry">
+            <div className="key-heading"><label htmlFor="groq-key">Your Groq API key</label><a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get a key ↗</a></div>
+            <div className="key-controls"><input id="groq-key" type={showKey ? 'text' : 'password'} autoComplete="off" spellCheck={false} disabled={busy} placeholder="Paste your gsk_ key" value={apiKey} onChange={event => { setApiKey(event.target.value); setNotice(''); }} /><button type="button" className="key-toggle" disabled={busy} onClick={() => setShowKey(value => !value)} aria-label={showKey ? 'Hide API key' : 'Show API key'}>{showKey ? 'Hide' : 'Show'}</button>{apiKey && <button type="button" className="key-toggle" disabled={busy} onClick={() => { setApiKey(''); setShowKey(false); }} aria-label="Forget API key">Forget</button>}</div>
+            <p>Your key and audio go straight from this browser to Groq. The key stays in this tab’s memory and is not saved by this app.</p>
+          </div>
           <div className={`dropzone ${dragging ? 'is-dragging' : ''}`} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
             <input ref={inputRef} type="file" accept={ACCEPT} multiple onChange={onPick} aria-label="Choose audio files" />
             <div className="upload-glyph" aria-hidden="true"><span>↑</span></div>
@@ -174,13 +306,13 @@ export default function Home() {
           <div className="queue-head"><h3>Queue <span>{jobs.length}</span></h3>{jobs.length > 0 && <button className="quiet-button" onClick={() => { setJobs([]); setActive(null); setNotice(''); }}>Clear all</button>}</div>
           {jobs.length === 0 ? <div className="empty-queue">Your audio files will appear here.</div> : <ul className="file-list">{jobs.map(job => <li className="file-row" key={job.id}>
             <div className="file-type" aria-hidden="true">{job.kind === 'subtitle' ? '≡' : '♪'}</div><div className="file-info"><strong title={job.file.name}>{job.file.name}</strong><span>{sizeLabel(job.file.size)}{job.duration ? ` · ${Math.floor(job.duration / 60)}:${String(Math.floor(job.duration % 60)).padStart(2, '0')}` : ''}</span></div>
-            <div className={`file-status status-${job.status}`} aria-live="polite">{job.status === 'uploading' ? <><span className="spinner"/>Uploading {job.uploadProgress ?? 0}%</> : job.status === 'working' ? <><span className="spinner"/>Transcribing</> : job.status === 'done' ? 'Ready' : job.status === 'error' ? 'Needs attention' : 'In queue'}</div>
+            <div className={`file-status status-${job.status}`} aria-live="polite">{job.status === 'preparing' ? <><span className="spinner"/>{job.phase || 'Preparing audio'}{job.progress !== undefined ? ` ${job.progress}%` : ''}</> : job.status === 'working' ? <><span className="spinner"/>{job.phase || 'Sending to Groq'}</> : job.status === 'done' ? 'Ready' : job.status === 'error' ? 'Needs attention' : 'In queue'}</div>
             {job.status === 'done' ? <button className="row-action" aria-label={`View ${job.file.name} transcript`} onClick={() => setActive(job.id)}>Open</button> : job.status === 'error' ? <button className="row-action" onClick={() => transcribe(job)}>Retry</button> : null}
             <button className="remove-button" aria-label={`Remove ${job.file.name}`} onClick={() => remove(job.id)}>×</button>
             {job.error && <p className="row-error">{job.error}</p>}
           </li>)}</ul>}
           {notice && <p className="notice" role="alert">{notice}</p>}
-          <div className="queue-actions"><p>{doneCount > 0 ? `${doneCount} of ${jobs.length} file${jobs.length === 1 ? '' : 's'} ready` : 'Groq API usage is billed to the site owner.'}</p><button className="primary-button" onClick={runAll} disabled={!jobs.some(job => job.kind === 'audio' && (job.status === 'queued' || job.status === 'error')) || busy}>{busy ? jobs.some(job => job.status === 'uploading') ? 'Uploading…' : 'Transcribing…' : doneCount ? 'Transcribe remaining' : 'Transcribe audio'} <span aria-hidden="true">↗</span></button></div>
+          <div className="queue-actions"><p>{doneCount > 0 ? `${doneCount} of ${jobs.length} file${jobs.length === 1 ? '' : 's'} ready` : 'Groq bills the account tied to your key.'}</p><button className="primary-button" onClick={runAll} disabled={!jobs.some(job => job.kind === 'audio' && (job.status === 'queued' || job.status === 'error')) || busy}>{busy ? jobs.some(job => job.status === 'preparing') ? 'Preparing audio…' : 'Transcribing…' : doneCount ? 'Transcribe remaining' : 'Transcribe audio'} <span aria-hidden="true">↗</span></button></div>
         </div>
         <aside className="result-panel" aria-label="Transcript results">
           <div className="result-head"><div><p className="section-index">02 / RESULT</p><h3>{current ? 'Transcript' : 'Your transcript'}</h3></div>{current && <span className="ready-label">READY</span>}</div>
@@ -188,7 +320,7 @@ export default function Home() {
           <div className="export-box" id="exports"><label htmlFor="format-select">Export as</label><div className="export-controls"><select id="format-select" value={format} onChange={event => setFormat(event.target.value as Format)}><option value="srt">SubRip subtitle (.srt)</option><option value="vtt">WebVTT subtitle (.vtt)</option><option value="txt">Plain text (.txt)</option><option value="json">JSON with timestamps (.json)</option></select><button className="download-button" disabled={!current} onClick={() => current && download(current)}>Download</button></div><button className="batch-link" disabled={!doneCount} onClick={downloadAll}>↓ Download all {doneCount > 0 ? `${doneCount} files` : 'files'} as ZIP</button><p>Subtitle exports keep cue timing from the source file.</p></div>
         </aside>
       </div>
-      <p className="privacy-note"><span aria-hidden="true">⌑</span> Your Groq key stays on the server. Large files use private temporary storage and are deleted after transcription. Connect a private Blob store in Vercel to enable uploads above 4 MB.</p>
+      <p className="privacy-note"><span aria-hidden="true">⌑</span> Audio and your key go directly from this browser to Groq. The key is kept in tab memory only. Files over 20 MB are split in this browser before their chunks are sent to Groq.</p>
     </section>
 
     <section className="workflow" id="how-it-works">

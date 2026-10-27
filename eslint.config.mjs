@@ -5,5 +5,5 @@ const compat = new FlatCompat({ baseDirectory: import.meta.dirname });
 
 export default defineConfig([
   ...compat.extends('next/core-web-vitals', 'next/typescript'),
-  globalIgnores(['.next/**', 'out/**', 'build/**', 'next-env.d.ts']),
+  globalIgnores(['.next/**', 'out/**', 'build/**', 'public/ffmpeg/**', 'next-env.d.ts']),
 ]);
