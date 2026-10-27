@@ -1,2 +1,36 @@
 import Link from 'next/link';
-export default function Privacy() { return <main className="legal-page"><header className="topbar"><Link className="brand" href="/"><span className="brand-mark" aria-hidden="true"><i/><i/><i/><i/><i/></span><span>groq<span className="brand-light">transcribe</span></span></Link><Link className="nav-action" href="/">Back to studio <span aria-hidden="true">↗</span></Link></header><article className="legal-main"><p className="section-index">SERVICE INFORMATION</p><h1>Privacy Policy</h1><p className="legal-updated">Draft for review · October 2026</p><div className="draft-notice"><strong>Draft, not legal advice.</strong> The service operator, contact details, hosting configuration, and final retention policy have not been confirmed. Verify these details and review this notice for applicable privacy laws before launch.</div><p>This draft describes the data flows in the current Groq Transcribe application. It should be updated to match the deployed service and the operator’s actual practices.</p><h2>Information processed</h2><p>Audio is sent from your browser directly to Groq’s transcription API using the API key you enter. Files larger than 20 MB are split into eight-minute FLAC chunks in your browser before those chunks are sent to Groq. The application does not route audio or your key through a Vercel API function or Vercel Blob storage. If transcript cleanup is enabled, text segments are sent directly from your browser to Groq’s chat completions API. SRT and WebVTT files are parsed and converted locally and are not sent to Groq.</p><h2>Where results are kept</h2><p>This application has no database. Transcripts and the API key are held in page memory and are cleared when the page is refreshed or closed; the key is not saved by the app. Audio stays on your device until your browser sends it directly to Groq. Downloads are saved by your browser. Vercel serves the app but does not receive the audio, transcripts, or key through this app’s API because there is no transcription API route.</p><h2>API keys and security</h2><p>You enter your own Groq API key. It is sent from your browser to Groq in the authorization header and is not sent to this application’s server or stored by the app. While the page is open, browser code running on this site can access the key; only enter a key you trust this site to use. Revoke or rotate the key through Groq if you believe it has been exposed. No account, analytics, or tracking cookies are implemented in this codebase.</p><h2>Third-party processing</h2><p>Audio, the API key, and optional transcript text are sent to Groq directly from the browser to provide the requested service. Vercel hosts and serves this web app but does not proxy transcription requests. Review Groq’s current policies, terms, retention settings, and applicable rights before processing sensitive recordings. Do not submit recordings you are not authorized to process.</p><h2>Your choices and contact</h2><p>You can choose not to submit a file, disable optional transcript cleanup, and clear queued files from the page. For privacy requests, contact the service operator. The operator’s name, contact email, legal basis, applicable rights process, and jurisdiction need to be supplied before publication.</p><p><Link href="/terms">Read the draft Terms of Service</Link> or return to the <Link href="/">transcription workspace</Link>.</p></article></main>; }
+
+export default function Privacy() {
+  return <main className="legal-page">
+    <header className="topbar">
+      <Link className="brand" href="/">
+        <span className="brand-mark" aria-hidden="true"><i/><i/><i/><i/><i/></span>
+        <span>groq<span className="brand-light">transcribe</span></span>
+      </Link>
+      <Link className="nav-action" href="/">Back to studio <span aria-hidden="true">↗</span></Link>
+    </header>
+    <article className="legal-main">
+      <p className="section-index">SERVICE INFORMATION</p>
+      <h1>Privacy Policy</h1>
+      <p className="legal-updated">Draft for review. October 2026</p>
+      <div className="draft-notice"><strong>Draft, not legal advice.</strong> The operator name, contact details, hosting setup, and retention terms need review before launch. Check local privacy rules and complete this notice.</div>
+      <p>This draft describes data flows in the current Groq Transcribe app. Update the notice when the service or operator practices change.</p>
+
+      <h2>Data sent to Groq</h2>
+      <p>Your browser sends audio and your Groq API key directly to Groq over HTTPS. Files above 20 MB are converted in your browser to eight-minute FLAC chunks. Your browser sends each chunk to Groq. The app does not send audio or the key through a Vercel API route or Blob store. Transcript cleanup sends text segments to Groq. SRT and WebVTT conversion runs in your browser. Those subtitle files do not go to Groq.</p>
+
+      <h2>Storage</h2>
+      <p>The app has no database. Your API key and transcripts stay in page memory. Refreshing or closing the tab clears them. Your browser creates downloaded files. Vercel serves the app and its static assets. The app sends no audio, transcript, or API key to Vercel endpoints.</p>
+
+      <h2>API key and security</h2>
+      <p>You enter your own Groq API key. The browser sends the key in the authorization header to Groq. The app does not save the key. Scripts on this site access the key while the page stays open. Enter a key only when you trust this site. Revoke or rotate an exposed key in Groq Console. The app has no accounts, analytics, or tracking cookies.</p>
+
+      <h2>Third-party processing</h2>
+      <p>Groq receives audio, your API key, and optional cleanup text. Review Groq’s current terms, retention settings, and data policies before sending sensitive recordings. Submit only recordings you have permission to process.</p>
+
+      <h2>Your choices and contact</h2>
+      <p>Skip audio submission, turn off transcript cleanup, or clear queued files. Send privacy requests to the service operator. The operator’s name, contact email, legal basis, rights process, and jurisdiction still need review before publication.</p>
+      <p><Link href="/terms">Read the draft Terms of Service</Link> or return to the <Link href="/">transcription workspace</Link>.</p>
+    </article>
+  </main>;
+}
