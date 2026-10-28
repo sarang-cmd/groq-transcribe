@@ -8,9 +8,10 @@ type Segment = { start: number; end: number; text: string; words?: Word[] };
 type Job = {
   id: string; file: File; kind: 'audio' | 'subtitle'; status: 'queued' | 'preparing' | 'working' | 'done' | 'error';
   progress?: number; uploadLoaded?: number; uploadTotal?: number; phase?: string; text?: string; segments?: Segment[]; duration?: number | null; language?: string | null;
-  enhanced?: boolean; error?: string; renameOutput?: boolean; outputName?: string;
+  enhanced?: boolean; error?: string; renameOutput?: boolean; outputName?: string; transcribedFormat?: Format;
 };
 type Format = 'txt' | 'srt' | 'vtt' | 'json';
+type RenameMode = 'ai' | 'heuristic' | 'off';
 type TranscriptionModel = 'whisper-large-v3-turbo' | 'whisper-large-v3';
 type Transcription = { text: string; segments: Segment[]; duration: number | null; language: string | null; enhanced: boolean };
 type GroqPayload = {
@@ -78,6 +79,11 @@ function cleanOutputName(name: string) {
     .slice(0, 100)
     .trim() || 'transcript';
 }
+function heuristicOutputName(text: string) {
+  const ignored = new Set(['about', 'after', 'again', 'also', 'and', 'are', 'because', 'been', 'before', 'being', 'but', 'could', 'did', 'does', 'doing', 'for', 'from', 'get', 'going', 'have', 'he', 'here', 'i', 'in', 'into', 'is', 'it', 'its', 'just', 'like', 'maybe', 'me', 'more', 'most', 'my', 'of', 'on', 'or', 'our', 'really', 'said', 'she', 'some', 'than', 'that', 'the', 'their', 'them', 'then', 'there', 'these', 'they', 'this', 'those', 'through', 'to', 'today', 'very', 'was', 'we', 'were', 'what', 'when', 'where', 'which', 'who', 'with', 'would', 'yeah', 'you', 'your', 'aber', 'auch', 'auf', 'aus', 'bei', 'bin', 'bis', 'das', 'dass', 'dein', 'dem', 'den', 'der', 'des', 'die', 'dies', 'doch', 'du', 'ein', 'eine', 'einer', 'eines', 'er', 'es', 'etwas', 'für', 'hat', 'habe', 'haben', 'hier', 'ich', 'ihm', 'ihn', 'ihr', 'im', 'ist', 'ja', 'kein', 'mit', 'muss', 'nach', 'nicht', 'noch', 'nur', 'oder', 'sein', 'seine', 'sich', 'sie', 'sind', 'so', 'und', 'uns', 'unser', 'vom', 'von', 'vor', 'war', 'waren', 'was', 'weil', 'wenn', 'wer', 'wie', 'wir', 'wo', 'zu', 'zum', 'zur', 'como', 'con', 'cuando', 'de', 'del', 'donde', 'el', 'ella', 'ellos', 'en', 'era', 'esta', 'este', 'fue', 'hay', 'la', 'las', 'le', 'lo', 'los', 'muy', 'no', 'para', 'pero', 'por', 'que', 'se', 'sin', 'sobre', 'su', 'sus', 'una', 'uno', 'y']);
+  const words = (text.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter(word => word.length > 1 && !ignored.has(word));
+  return aiOutputName(words.slice(0, 6).join('-') || words.slice(0, 6).join(' '));
+}
 function aiOutputName(name: string) {
   return cleanOutputName(name)
     .toLocaleLowerCase()
@@ -86,7 +92,7 @@ function aiOutputName(name: string) {
     .slice(0, 100) || 'transcript';
 }
 function exportFilename(job: Job, format: Format) {
-  const useCustomName = (format === 'srt' || format === 'vtt') && job.renameOutput;
+  const useCustomName = job.renameOutput;
   const filename = useCustomName ? cleanOutputName(job.outputName || stem(job.file.name)) : stem(job.file.name);
   return `${filename}.${format}`;
 }
@@ -313,6 +319,8 @@ export default function Home() {
   const [format, setFormat] = useState<Format>('srt');
   const [language, setLanguage] = useState('auto');
   const [transcriptionModel, setTranscriptionModel] = useState<TranscriptionModel>('whisper-large-v3-turbo');
+  const [renameMode, setRenameMode] = useState<RenameMode>('ai');
+  const [renamingAll, setRenamingAll] = useState(false);
   const [enhance, setEnhance] = useState(true);
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState('');
@@ -328,7 +336,7 @@ export default function Home() {
     setNotificationPermission('Notification' in window ? Notification.permission : 'unsupported');
   }, []);
   const doneCount = jobs.filter(job => job.status === 'done').length;
-  const busy = jobs.some(job => job.status === 'preparing' || job.status === 'working') || grammarId !== null || namingId !== null;
+  const busy = jobs.some(job => job.status === 'preparing' || job.status === 'working') || grammarId !== null || namingId !== null || renamingAll;
 
   async function addFiles(files: FileList | File[]) {
     const incoming = Array.from(files);
@@ -346,12 +354,30 @@ export default function Home() {
         try {
           const segments = parseSubtitle(await file.text());
           if (!segments.length) { problems.push(`${file.name}: no valid SRT or WebVTT cues found`); continue; }
-          valid.push({ id, file, kind: 'subtitle', status: 'done', segments, text: segments.map(segment => segment.text).join(' '), duration: segments.at(-1)?.end, renameOutput: true, outputName: stem(file.name) });
+          const text = segments.map(segment => segment.text).join(' ');
+          valid.push({ id, file, kind: 'subtitle', status: 'done', segments, text, duration: segments.at(-1)?.end, renameOutput: renameMode !== 'off', outputName: renameMode === 'heuristic' ? heuristicOutputName(text) : stem(file.name) });
         } catch { problems.push(`${file.name}: Unable to read subtitle file`); }
       } else valid.push({ id, file, kind: 'audio', status: 'queued' });
     }
     if (valid.length) { setJobs(current => [...current, ...valid]); setNotice(''); }
+    const importedToName = valid.filter(job => job.kind === 'subtitle' && renameMode === 'ai' && apiKey.trim());
+    if (importedToName.length) {
+      setRenamingAll(true);
+      let failedNames = 0;
+      try {
+        for (const job of importedToName) {
+          try {
+            const outputName = await suggestOutputFilename(job.text || '', apiKey.trim());
+            setJobs(current => current.map(item => item.id === job.id ? { ...item, outputName } : item));
+          } catch { failedNames++; }
+        }
+      } finally {
+        setRenamingAll(false);
+        if (failedNames) setNotice(`${failedNames} subtitle filename${failedNames === 1 ? '' : 's'} could not be named by Groq. The original name stays in place.`);
+      }
+    }
     if (problems.length) setNotice(problems.slice(0, 3).join('. ') + (problems.length > 3 ? `, and ${problems.length - 3} more.` : '.'));
+    else if (valid.some(job => job.kind === 'subtitle') && renameMode === 'ai' && !apiKey.trim()) setNotice('Add your Groq API key to apply AI filenames to imported subtitles. Their original names stay in place until then.');
   }
   function onPick(event: ChangeEvent<HTMLInputElement>) { if (event.target.files) addFiles(event.target.files); event.target.value = ''; }
   function onDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }
@@ -390,17 +416,18 @@ export default function Home() {
         setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', phase: 'Cleaning up transcript with Groq', progress: undefined, uploadLoaded: undefined, uploadTotal: undefined } : item));
         result = await cleanSegments(result, apiKey.trim());
       }
-      const renameOutput = true;
+      const renameOutput = renameMode !== 'off';
       let outputName = stem(job.file.name);
-      if (format === 'srt' || format === 'vtt') {
-        setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', phase: 'Naming subtitle file with Groq', progress: undefined, uploadLoaded: undefined, uploadTotal: undefined } : item));
+      if (renameMode === 'heuristic') outputName = heuristicOutputName(result.text);
+      if (renameMode === 'ai') {
+        setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', phase: 'Naming output file with Groq', progress: undefined, uploadLoaded: undefined, uploadTotal: undefined } : item));
         try {
           outputName = await suggestOutputFilename(result.text, apiKey.trim());
         } catch {
           setNotice('Transcript ready. The original filename stays in place because Groq could not suggest a name.');
         }
       }
-      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'done', text: result.text, segments: result.segments, duration: result.duration, language: result.language, enhanced: result.enhanced, renameOutput, outputName, phase: undefined, progress: undefined, uploadLoaded: undefined, uploadTotal: undefined } : item));
+      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'done', text: result.text, segments: result.segments, duration: result.duration, language: result.language, enhanced: result.enhanced, renameOutput, outputName, transcribedFormat: format, phase: undefined, progress: undefined, uploadLoaded: undefined, uploadTotal: undefined } : item));
       return true;
     } catch (error) {
       const message = error instanceof TypeError
@@ -415,8 +442,15 @@ export default function Home() {
     const succeeded = await transcribe(job);
     sendBrowserNotification(succeeded ? 'Upload finished' : 'Upload failed', succeeded ? 'Your transcript is ready.' : 'Check the queue for the error.');
   }
+  function redoTranscriptionAsSrt(job: Job) {
+    setFormat('srt');
+    setActive(null);
+    setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'queued', text: undefined, segments: undefined, duration: undefined, language: undefined, enhanced: undefined, error: undefined, phase: undefined, progress: undefined, uploadLoaded: undefined, uploadTotal: undefined, transcribedFormat: undefined } : item));
+    setNotice('Audio queued again with SRT selected. Press the transcription button to run it.');
+  }
   async function runAll() {
     if (!apiKey.trim()) { setNotice('Add your Groq API key above before transcribing.'); return; }
+    setNotice('');
     const queued = jobs.filter(job => job.kind === 'audio' && (job.status === 'queued' || job.status === 'error'));
     if (!queued.length) return;
     const fileLabel = `${queued.length} audio file${queued.length === 1 ? '' : 's'}`;
@@ -432,6 +466,7 @@ export default function Home() {
     sendBrowserNotification('Uploads finished', summary);
   }
   function download(job: Job, as = format) {
+    if (as === 'srt' && job.kind === 'audio' && job.transcribedFormat === 'txt') { setNotice('This file was transcribed as plain text. SRT needs timed cues. Transcribe the audio again with SRT selected.'); return; }
     if (as !== 'txt' && !job.segments?.length && as !== 'json') { setNotice('This transcription did not include timestamped segments. Try TXT or JSON.'); return; }
     const blob = new Blob([output(job, as)], { type: as === 'json' ? 'application/json' : as === 'txt' ? 'text/plain' : 'text/plain;charset=utf-8' });
     const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = exportFilename(job, as); link.click(); URL.revokeObjectURL(link.href);
@@ -439,6 +474,7 @@ export default function Home() {
   async function downloadAll() {
     const complete = jobs.filter(job => job.status === 'done');
     if (!complete.length) return;
+    if (format === 'srt' && complete.some(job => job.kind === 'audio' && job.transcribedFormat === 'txt')) { setNotice('One or more files were transcribed as plain text. Transcribe those audio files again with SRT selected before creating this ZIP.'); return; }
     const zip = new JSZip();
     const usedNames = new Set<string>();
     for (const job of complete) {
@@ -475,6 +511,30 @@ export default function Home() {
   }
   function toggleRename(id: string, enabled: boolean) {
     setJobs(current => current.map(job => job.id === id ? { ...job, renameOutput: enabled, outputName: enabled ? job.outputName || stem(job.file.name) : job.outputName } : job));
+  }
+  async function changeRenameMode(mode: RenameMode) {
+    setRenameMode(mode);
+    setNotice('');
+    const complete = jobs.filter(job => job.status === 'done');
+    setJobs(current => current.map(job => job.status !== 'done' ? job : {
+      ...job, renameOutput: mode !== 'off',
+      outputName: mode === 'heuristic' ? heuristicOutputName(job.text || '') : stem(job.file.name),
+    }));
+    if (mode !== 'ai' || !complete.length) return;
+    if (!apiKey.trim()) { setNotice('Add your Groq API key to create AI filenames. Original filenames stay in place until then.'); return; }
+    setRenamingAll(true);
+    let failedNames = 0;
+    try {
+      for (const job of complete) {
+        try {
+          const outputName = await suggestOutputFilename(job.text || '', apiKey.trim());
+          setJobs(current => current.map(item => item.id === job.id ? { ...item, outputName } : item));
+        } catch { failedNames++; }
+      }
+    } finally {
+      setRenamingAll(false);
+      if (failedNames) setNotice(`${failedNames} filename${failedNames === 1 ? '' : 's'} could not be generated. Original names stay in place for those files.`);
+    }
   }
   function updateOutputName(id: string, outputName: string) { setJobs(current => current.map(job => job.id === id ? { ...job, outputName } : job)); }
   async function nameWithAI(job: Job) {
@@ -548,6 +608,7 @@ export default function Home() {
 
     <section className="studio" id="studio" aria-labelledby="studio-title">
       <div className="studio-heading"><div><p className="section-index">01 / YOUR WORKSPACE</p><h2 id="studio-title">Start with a file.</h2><p className="section-intro">Upload one recording or a whole batch. Your files stay in this session.</p></div><span className="engine-label"><span className="engine-dot"/> GROQ AUDIO</span></div>
+      <aside className="quick-guide" aria-label="Quick guide"><strong>Quick guide</strong><ol><li>Add your key and files</li><li>Choose a model, filename style and format</li><li>Transcribe and review. Convert the export if needed.</li></ol><p>TXT to SRT needs a new transcription with SRT selected.</p></aside>
       <div className="studio-grid">
         <div className="work-panel">
           <div className="key-entry">
@@ -569,13 +630,16 @@ export default function Home() {
           </div>
           <div className="options-row">
             <div className="transcription-options">
-              {(!jobs.length || jobs.some(job => job.kind === 'audio')) ? <>
+              {(!jobs.length || jobs.some(job => job.kind === 'audio')) && <>
                 <label className="select-wrap"><span>Audio language</span><select value={language} onChange={event => setLanguage(event.target.value)} disabled={busy}><option value="auto">Detect automatically</option><option value="en">English</option><option value="de">German</option><option value="es">Spanish</option><option value="fr">French</option><option value="it">Italian</option><option value="pt">Portuguese</option><option value="nl">Dutch</option><option value="ja">Japanese</option><option value="zh">Chinese</option></select></label>
                 <label className="select-wrap model-select"><span>Transcription model</span><select value={transcriptionModel} onChange={event => setTranscriptionModel(event.target.value as TranscriptionModel)} disabled={busy}><option value="whisper-large-v3-turbo">Whisper Large V3 Turbo</option><option value="whisper-large-v3">Whisper Large V3</option></select><small>{transcriptionModel === 'whisper-large-v3-turbo' ? 'About $0.04/hour · faster, lower cost, slightly less accurate.' : 'About $0.111/hour · higher accuracy, slower, higher cost.'} Groq rates may change.</small></label>
+
                 <label className="enhance-toggle"><input type="checkbox" checked={enhance} onChange={event => setEnhance(event.target.checked)} disabled={busy}/><span className="switch" aria-hidden="true"/><span><b>Clean up automatically</b><small>Fix grammar, punctuation and readability</small></span></label>
-              </> : <p className="subtitle-local">SRT and WebVTT files convert locally.</p>}
+              </>}
+              <label className="select-wrap naming-select"><span>File naming for all results</span><select value={renameMode} onChange={event => void changeRenameMode(event.target.value as RenameMode)} disabled={busy}><option value="ai">AI suggestion</option><option value="heuristic">Transcript heuristic, local</option><option value="off">Keep original names</option></select><small>{renamingAll ? 'Applying the selected filename style to completed results.' : renameMode === 'ai' ? 'Sends up to 6,000 transcript characters to Groq for a filename.' : renameMode === 'heuristic' ? 'Uses the first meaningful transcript words locally.' : 'Keeps source names. No filename request.'}</small></label>
+              {jobs.length > 0 && !jobs.some(job => job.kind === 'audio') && <p className="subtitle-local">SRT and WebVTT files convert locally.</p>}
             </div>
-            <label className="select-wrap output-format-control" id="exports"><span>Output format</span><select id="format-select" value={format} onChange={event => setFormat(event.target.value as Format)} disabled={busy}><option value="srt">SubRip subtitle (.srt)</option><option value="vtt">WebVTT subtitle (.vtt)</option><option value="txt">Plain text (.txt)</option><option value="json">JSON with timestamps (.json)</option></select><small>SRT and WebVTT files get an AI name by default.</small></label>
+            <label className="select-wrap output-format-control" id="exports"><span>Starting output format</span><select id="format-select" value={format} onChange={event => setFormat(event.target.value as Format)} disabled={busy}><option value="srt">SubRip subtitle (.srt)</option><option value="vtt">WebVTT subtitle (.vtt)</option><option value="txt">Plain text (.txt)</option><option value="json">JSON with timestamps (.json)</option></select><small>You can change the export format after transcription.</small></label>
           </div>
           <div className="queue-head"><h3>Queue <span>{jobs.length}</span></h3>{jobs.length > 0 && <button className="quiet-button" onClick={() => { setJobs([]); setActive(null); setNotice(''); }}>Clear all</button>}</div>
           {jobs.length === 0 ? <div className="empty-queue">Your audio files will appear here.</div> : <ul className="file-list">{jobs.map(job => <li className="file-row" key={job.id}>
@@ -587,12 +651,12 @@ export default function Home() {
             {job.error && <p className="row-error">{job.error}</p>}
           </li>)}</ul>}
           {notice && <p className="notice" role="alert">{notice}</p>}
-          <div className="queue-actions"><p>{doneCount > 0 ? `${doneCount} of ${jobs.length} file${jobs.length === 1 ? '' : 's'} ready` : 'Groq bills the account tied to your key.'}</p><button className="primary-button" onClick={runAll} disabled={!jobs.some(job => job.kind === 'audio' && (job.status === 'queued' || job.status === 'error')) || busy}>{busy ? jobs.some(job => job.status === 'preparing') ? 'Preparing audio…' : 'Transcribing…' : doneCount ? 'Transcribe remaining' : 'Transcribe audio'} <span aria-hidden="true">↗</span></button></div>
+          <div className="queue-actions"><p>{doneCount > 0 ? `${doneCount} of ${jobs.length} file${jobs.length === 1 ? '' : 's'} ready` : 'Groq bills the account tied to your key.'}</p><button className="primary-button" onClick={runAll} disabled={!jobs.some(job => job.kind === 'audio' && (job.status === 'queued' || job.status === 'error')) || busy}>{busy ? renamingAll ? 'Naming files…' : jobs.some(job => job.status === 'preparing') ? 'Preparing audio…' : 'Transcribing…' : doneCount ? 'Transcribe remaining' : 'Transcribe audio'} <span aria-hidden="true">↗</span></button></div>
         </div>
         <aside className="result-panel" aria-label="Transcript results">
           <div className="result-head"><div><p className="section-index">02 / RESULT</p><h3>{current ? 'Transcript' : 'Your transcript'}</h3></div>{current && <span className="ready-label">READY</span>}</div>
           {!current ? <div className="result-empty"><div className="paper-icon" aria-hidden="true"><span/><span/><span/></div><p>Your transcript will appear here, ready to review and export.</p><small>No sample text. Your own recording is the preview.</small></div> : <div className="transcript-view"><p className="transcript-file">{current.file.name}{current.enhanced && <span> CLEANED UP</span>}</p>{current.kind === 'audio' && audioUrl && <audio ref={audioRef} className="audio-player" src={audioUrl} controls preload="metadata" aria-label={`Play audio for ${current.file.name}`} onTimeUpdate={event => setPlaybackTime(event.currentTarget.currentTime)}/>}<div className="transcript-toolbar"><button className="copy-button" onClick={() => navigator.clipboard?.writeText(current.text || '')}>Copy transcript</button><button className="copy-button" onClick={() => fixGrammar(current)} disabled={busy}>{grammarId === current.id ? 'Fixing grammar...' : 'Fix grammar'}</button><button className="copy-button" onClick={() => setEditingId(editingId === current.id ? null : current.id)} aria-pressed={editingId === current.id}>{editingId === current.id ? 'Done editing' : 'Edit transcript'}</button></div>{editingId === current.id ? <textarea className="transcript-editor" aria-label={`Edit transcript for ${current.file.name}`} value={current.text || ''} onChange={event => updateText(current.id, event.target.value)} spellCheck /> : <SyncedTranscript job={current} time={playbackTime} onSeek={seekTo}/>} {current.language && <small className="detected-language">Detected language: {current.language}</small>}<small className="sync-hint">{current.kind === 'audio' ? 'Click a line to seek. Words follow the audio.' : 'Subtitle timing stays with each line.'}</small></div>}
-          <div className="export-box"><p className="export-format-label">Selected format: {format.toUpperCase()}</p><div className="export-controls"><button className="download-button" disabled={!current} onClick={() => current && download(current)}>Download</button></div>{current && (format === 'srt' || format === 'vtt') && <><div className="subtitle-name-actions"><label className="rename-toggle"><input type="checkbox" checked={Boolean(current.renameOutput)} onChange={event => toggleRename(current.id, event.target.checked)}/><span>Rename subtitle file</span></label><button type="button" className="ai-name-button" onClick={() => nameWithAI(current)} disabled={busy || Boolean(namingId)}>{namingId === current.id ? 'Naming...' : 'Name with AI'}</button></div>{current.renameOutput && <div className="rename-field"><label htmlFor={`subtitle-name-${current.id}`}>File name, without extension</label><input id={`subtitle-name-${current.id}`} value={current.outputName ?? stem(current.file.name)} onChange={event => updateOutputName(current.id, event.target.value)} maxLength={120}/></div>}</>}<button className="batch-link" disabled={!doneCount} onClick={downloadAll}>↓ Download all {doneCount > 0 ? `${doneCount} files` : 'files'} as ZIP</button><p>Subtitle exports keep cue timing from the source file.</p></div>
+          <div className="export-box"><label className="select-wrap convert-control"><span>Convert to</span><select value={format} onChange={event => setFormat(event.target.value as Format)} disabled={!current || busy}><option value="srt">SubRip subtitle (.srt)</option><option value="vtt">WebVTT subtitle (.vtt)</option><option value="txt">Plain text (.txt)</option><option value="json">JSON with timestamps (.json)</option></select></label><p className="export-format-label">Ready to export as {format.toUpperCase()}</p><div className="export-controls"><button className="download-button" disabled={!current || busy || Boolean(current && format === 'srt' && current.kind === 'audio' && current.transcribedFormat === 'txt')} onClick={() => current && download(current)}>Download</button></div>{current?.kind === 'audio' && current.transcribedFormat === 'txt' && format === 'srt' && <button type="button" className="redo-export" disabled={busy} onClick={() => redoTranscriptionAsSrt(current)}>Transcribe again as SRT</button>}{current && <><div className="subtitle-name-actions"><label className="rename-toggle"><input type="checkbox" checked={Boolean(current.renameOutput)} onChange={event => toggleRename(current.id, event.target.checked)}/><span>Rename exported file</span></label><button type="button" className="ai-name-button" onClick={() => nameWithAI(current)} disabled={busy || Boolean(namingId)}>{namingId === current.id ? 'Naming...' : 'Name with AI'}</button></div>{current.renameOutput && <div className="rename-field"><label htmlFor={`subtitle-name-${current.id}`}>File name, without extension</label><input id={`subtitle-name-${current.id}`} value={current.outputName ?? stem(current.file.name)} onChange={event => updateOutputName(current.id, event.target.value)} maxLength={120}/></div>}</>}<button className="batch-link" disabled={!doneCount || busy} onClick={downloadAll}>↓ Download all {doneCount > 0 ? `${doneCount} files` : 'files'} as ZIP</button><p>{format === 'srt' ? 'SRT keeps cue timing. A transcript created as TXT must be transcribed again for SRT.' : 'Change this format any time before downloading. Subtitle exports keep their cue timing.'}</p></div>
         </aside>
       </div>
       <p className="privacy-note"><span aria-hidden="true">⌑</span> Audio and your key go directly from this browser to Groq. The key is kept in tab memory only. Files over 20 MB are split in this browser before their chunks are sent to Groq.</p>
