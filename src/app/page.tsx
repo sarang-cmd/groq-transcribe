@@ -608,7 +608,7 @@ export default function Home() {
 
     <section className="studio" id="studio" aria-labelledby="studio-title">
       <div className="studio-heading"><div><p className="section-index">01 / YOUR WORKSPACE</p><h2 id="studio-title">Start with a file.</h2><p className="section-intro">Upload one recording or a whole batch. Your files stay in this session.</p></div><span className="engine-label"><span className="engine-dot"/> GROQ AUDIO</span></div>
-      <aside className="quick-guide" aria-label="Quick guide"><strong>Quick guide</strong><ol><li>Add your key and files</li><li>Choose a model, filename style and format</li><li>Transcribe and review. Convert the export if needed.</li></ol><p>TXT to SRT needs a new transcription with SRT selected.</p></aside>
+      <aside className="quick-guide" aria-label="Quick guide"><strong>Quick guide</strong><p>Add your key and files. Choose a model and filename style. Transcribe, then change the export if needed. TXT to SRT needs a new run.</p></aside>
       <div className="studio-grid">
         <div className="work-panel">
           <div className="key-entry">
