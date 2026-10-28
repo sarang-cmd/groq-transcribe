@@ -10,11 +10,13 @@ A BYOK tool for audio transcription, subtitle conversion, and transcript export.
 - Direct Groq transcription with `whisper-large-v3-turbo` and your key
 - Browser-side eight-minute mono 16 kHz FLAC chunks for files over 20 MiB
 - Combined transcript text and timestamps
-- Optional Groq transcript cleanup with `llama-3.3-70b-versatile`
+- Optional transcript cleanup and on-demand grammar fixes with `openai/gpt-oss-120b`
+- Output format selection before transcription
+- Audio playback with synchronized word-level transcript highlighting
 - Local SRT and WebVTT conversion
 - TXT, SRT, WebVTT, and JSON exports, plus ZIP download
 - AI-suggested or custom filenames for SRT and WebVTT exports
-- AI filename requests send up to 6,000 transcript characters to Groq after you choose Name with AI
+- SRT and WebVTT exports use an AI-generated filename by default. Each request sends up to 6,000 transcript characters to Groq.
 - Optional browser alerts for upload start and finish, using the app icon
 
 ## Groq limits
