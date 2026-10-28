@@ -1,6 +1,6 @@
 'use client';
 
-import { ChangeEvent, DragEvent, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, useEffect, useRef, useState } from 'react';
 import JSZip from 'jszip';
 
 type Segment = { start: number; end: number; text: string };
@@ -22,6 +22,15 @@ const MAX_SUBTITLE_BYTES = 4 * 1024 * 1024;
 const CHUNK_THRESHOLD_BYTES = 20 * 1024 * 1024;
 const CHUNK_SECONDS = 8 * 60;
 const GROQ_API = 'https://api.groq.com/openai/v1';
+const APP_ICON = '/icon.svg';
+
+function sendBrowserNotification(title: string, body: string) {
+  if (typeof window === 'undefined' || !('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    const notification = new Notification(title, { body, icon: APP_ICON, badge: APP_ICON });
+    notification.onclick = () => { window.focus(); notification.close(); };
+  } catch { /* Ignore browsers that block notifications outside a secure context. */ }
+}
 
 function stamp(seconds: number, comma = true) {
   const ms = Math.max(0, Math.floor(seconds * 1000));
@@ -213,6 +222,11 @@ export default function Home() {
   const [notice, setNotice] = useState('');
   const [active, setActive] = useState<string | null>(null);
   const [namingId, setNamingId] = useState<string | null>(null);
+  const [notificationPermission, setNotificationPermission] = useState<'unknown' | NotificationPermission | 'unsupported'>('unknown');
+
+  useEffect(() => {
+    setNotificationPermission('Notification' in window ? Notification.permission : 'unsupported');
+  }, []);
   const doneCount = jobs.filter(job => job.status === 'done').length;
   const busy = jobs.some(job => job.status === 'preparing' || job.status === 'working');
 
@@ -241,8 +255,20 @@ export default function Home() {
   }
   function onPick(event: ChangeEvent<HTMLInputElement>) { if (event.target.files) addFiles(event.target.files); event.target.value = ''; }
   function onDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); setDragging(false); addFiles(event.dataTransfer.files); }
+  async function enableNotifications() {
+    if (!('Notification' in window)) { setNotificationPermission('unsupported'); return; }
+    try {
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      if (permission === 'denied') setNotice('Notifications are blocked. Allow them in your browser settings.');
+      else if (permission === 'granted') setNotice('');
+    } catch {
+      setNotificationPermission('unsupported');
+      setNotice('Your browser could not enable notifications.');
+    }
+  }
 
-  async function transcribe(job: Job) {
+  async function transcribe(job: Job): Promise<boolean> {
     try {
       if (!apiKey.trim()) throw new Error('Add your Groq API key above before transcribing.');
       setJobs(current => current.map(item => item.id === job.id ? { ...item, status: item.file.size > CHUNK_THRESHOLD_BYTES ? 'preparing' : 'working', phase: item.file.size > CHUNK_THRESHOLD_BYTES ? 'Preparing audio in this browser' : 'Sending directly to Groq', progress: 0, error: undefined } : item));
@@ -260,18 +286,35 @@ export default function Home() {
         result = await cleanSegments(result, apiKey.trim());
       }
       setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'done', text: result.text, segments: result.segments, duration: result.duration, language: result.language, enhanced: result.enhanced, phase: undefined, progress: undefined } : item));
+      return true;
     } catch (error) {
       const message = error instanceof TypeError
         ? 'Groq did not respond to the browser request. Check your connection, CORS access, or browser privacy extensions, then retry.'
         : error instanceof Error ? error.message : 'Something went wrong. Please try again.';
       setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'error', error: message, phase: undefined, progress: undefined } : item));
+      return false;
     }
+  }
+  async function retryUpload(job: Job) {
+    sendBrowserNotification('Upload started', 'Preparing and sending one audio file to Groq.');
+    const succeeded = await transcribe(job);
+    sendBrowserNotification(succeeded ? 'Upload finished' : 'Upload failed', succeeded ? 'Your transcript is ready.' : 'Check the queue for the error.');
   }
   async function runAll() {
     if (!apiKey.trim()) { setNotice('Add your Groq API key above before transcribing.'); return; }
     const queued = jobs.filter(job => job.kind === 'audio' && (job.status === 'queued' || job.status === 'error'));
+    if (!queued.length) return;
+    const fileLabel = `${queued.length} audio file${queued.length === 1 ? '' : 's'}`;
+    sendBrowserNotification('Uploads started', `Preparing and sending ${fileLabel} to Groq.`);
+    let succeeded = 0;
+    let failed = 0;
     // Process sequentially so a large WASM conversion does not compete for memory with another file.
-    for (const job of queued) await transcribe(job);
+    for (const job of queued) {
+      if (await transcribe(job)) succeeded++;
+      else failed++;
+    }
+    const summary = failed ? `${succeeded} complete, ${failed} failed.` : `${succeeded} complete.`;
+    sendBrowserNotification('Uploads finished', summary);
   }
   function download(job: Job, as = format) {
     if (as !== 'txt' && !job.segments?.length && as !== 'json') { setNotice('This transcription did not include timestamped segments. Try TXT or JSON.'); return; }
@@ -356,6 +399,12 @@ export default function Home() {
             <div className="key-heading"><label htmlFor="groq-key">Your Groq API key</label><a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get a key ↗</a></div>
             <div className="key-controls"><input id="groq-key" type={showKey ? 'text' : 'password'} autoComplete="off" spellCheck={false} disabled={busy} placeholder="Paste your gsk_ key" value={apiKey} onChange={event => { setApiKey(event.target.value); setNotice(''); }} /><button type="button" className="key-toggle" disabled={busy} onClick={() => setShowKey(value => !value)} aria-label={showKey ? 'Hide API key' : 'Show API key'}>{showKey ? 'Hide' : 'Show'}</button>{apiKey && <button type="button" className="key-toggle" disabled={busy} onClick={() => { setApiKey(''); setShowKey(false); }} aria-label="Forget API key">Forget</button>}</div>
             <p>Your key and audio go straight from this browser to Groq. The key stays in this tab’s memory and is not saved by this app.</p>
+            <div className="notification-control">
+              <button type="button" className="notification-button" onClick={enableNotifications} disabled={notificationPermission === 'granted' || notificationPermission === 'denied' || notificationPermission === 'unsupported'}>
+                {notificationPermission === 'granted' ? 'Notifications enabled' : notificationPermission === 'denied' ? 'Notifications blocked' : notificationPermission === 'unsupported' ? 'Notifications unavailable' : 'Enable upload notifications'}
+              </button>
+              <span>{notificationPermission === 'denied' ? 'Allow them in browser settings, then reload.' : notificationPermission === 'unsupported' ? 'Browser notifications are not available.' : 'Get alerts when uploads start and finish.'}</span>
+            </div>
           </div>
           <div className={`dropzone ${dragging ? 'is-dragging' : ''}`} onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
             <input ref={inputRef} type="file" accept={ACCEPT} multiple onChange={onPick} aria-label="Choose audio files" />
@@ -371,7 +420,7 @@ export default function Home() {
           {jobs.length === 0 ? <div className="empty-queue">Your audio files will appear here.</div> : <ul className="file-list">{jobs.map(job => <li className="file-row" key={job.id}>
             <div className="file-type" aria-hidden="true">{job.kind === 'subtitle' ? '≡' : '♪'}</div><div className="file-info"><strong title={job.file.name}>{job.file.name}</strong><span>{sizeLabel(job.file.size)}{job.duration ? ` · ${Math.floor(job.duration / 60)}:${String(Math.floor(job.duration % 60)).padStart(2, '0')}` : ''}</span></div>
             <div className={`file-status status-${job.status}`} aria-live="polite">{job.status === 'preparing' ? <><span className="spinner"/>{job.phase || 'Preparing audio'}{job.progress !== undefined ? ` ${job.progress}%` : ''}</> : job.status === 'working' ? <><span className="spinner"/>{job.phase || 'Sending to Groq'}</> : job.status === 'done' ? 'Ready' : job.status === 'error' ? 'Needs attention' : 'In queue'}</div>
-            {job.status === 'done' ? <button className="row-action" aria-label={`View ${job.file.name} transcript`} onClick={() => setActive(job.id)}>Open</button> : job.status === 'error' ? <button className="row-action" onClick={() => transcribe(job)}>Retry</button> : null}
+            {job.status === 'done' ? <button className="row-action" aria-label={`View ${job.file.name} transcript`} onClick={() => setActive(job.id)}>Open</button> : job.status === 'error' ? <button className="row-action" onClick={() => retryUpload(job)}>Retry</button> : null}
             <button className="remove-button" aria-label={`Remove ${job.file.name}`} onClick={() => remove(job.id)}>×</button>
             {job.error && <p className="row-error">{job.error}</p>}
           </li>)}</ul>}
