@@ -7,10 +7,11 @@ type Word = { start: number; end: number; word: string };
 type Segment = { start: number; end: number; text: string; words?: Word[] };
 type Job = {
   id: string; file: File; kind: 'audio' | 'subtitle'; status: 'queued' | 'preparing' | 'working' | 'done' | 'error';
-  progress?: number; phase?: string; text?: string; segments?: Segment[]; duration?: number | null; language?: string | null;
+  progress?: number; uploadLoaded?: number; uploadTotal?: number; phase?: string; text?: string; segments?: Segment[]; duration?: number | null; language?: string | null;
   enhanced?: boolean; error?: string; renameOutput?: boolean; outputName?: string;
 };
 type Format = 'txt' | 'srt' | 'vtt' | 'json';
+type TranscriptionModel = 'whisper-large-v3-turbo' | 'whisper-large-v3';
 type Transcription = { text: string; segments: Segment[]; duration: number | null; language: string | null; enhanced: boolean };
 type GroqPayload = {
   text?: unknown; segments?: unknown; words?: unknown; duration?: unknown; language?: unknown;
@@ -64,6 +65,8 @@ function parseSubtitle(source: string): Segment[] {
   });
 }
 function sizeLabel(bytes: number) { return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`; }
+function transferLabel(bytes: number) { return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
+function progressPercent(loaded: number, total: number) { return total > 0 ? Math.max(0, Math.min(100, Math.round(loaded / total * 100))) : 0; }
 function stem(name: string) { return name.replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_').trim() || 'transcript'; }
 function cleanOutputName(name: string) {
   return name.trim()
@@ -88,21 +91,43 @@ function exportFilename(job: Job, format: Format) {
   return `${filename}.${format}`;
 }
 
+function groqError(status: number, data: GroqPayload | null) {
+  const providerMessage = typeof data?.error?.message === 'string' ? data.error.message : '';
+  return new Error(status === 401 ? 'Groq rejected this key. Check the key field and try again.'
+    : status === 413 ? 'Groq rejected this audio size. This chunk should fit the documented limit; try again or check your Groq plan.'
+    : status === 429 ? 'Groq rate limit or audio quota reached. Wait a little or review your Groq account limits.'
+    : providerMessage || `Groq returned an error (${status}).`);
+}
+
 async function groqRequest(path: string, apiKey: string, body: BodyInit, contentType?: string) {
   const headers = new Headers({ Authorization: `Bearer ${apiKey}` });
   if (contentType) headers.set('Content-Type', contentType);
   const response = await fetch(`${GROQ_API}${path}`, { method: 'POST', headers, body });
   let data: GroqPayload | null = null;
   try { data = await response.json() as GroqPayload; } catch { /* handled below */ }
-  if (!response.ok) {
-    const providerMessage = typeof data?.error?.message === 'string' ? data.error.message : '';
-    const message = response.status === 401 ? 'Groq rejected this key. Check the key field and try again.'
-      : response.status === 413 ? 'Groq rejected this audio size. This chunk should fit the documented limit; try again or check your Groq plan.'
-      : response.status === 429 ? 'Groq rate limit or audio quota reached. Wait a little or review your Groq account limits.'
-      : providerMessage || `Groq returned an error (${response.status}).`;
-    throw new Error(message);
-  }
+  if (!response.ok) throw groqError(response.status, data);
   return data;
+}
+
+function groqUpload(form: FormData, apiKey: string, fallbackBytes: number, onProgress: (loaded: number, total: number) => void): Promise<GroqPayload | null> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', `${GROQ_API}/audio/transcriptions`);
+    request.responseType = 'json';
+    request.setRequestHeader('Authorization', `Bearer ${apiKey}`);
+    request.upload.onprogress = event => {
+      const total = event.lengthComputable && event.total > 0 ? event.total : fallbackBytes;
+      onProgress(Math.min(event.loaded, total), total);
+    };
+    request.onload = () => {
+      const data = request.response && typeof request.response === 'object' ? request.response as GroqPayload : null;
+      if (request.status >= 200 && request.status < 300) resolve(data);
+      else reject(groqError(request.status, data));
+    };
+    request.onerror = () => reject(new TypeError('Groq did not respond to the browser request.'));
+    request.onabort = () => reject(new Error('The upload was cancelled.'));
+    request.send(form);
+  });
 }
 
 async function suggestOutputFilename(text: string, apiKey: string) {
@@ -119,10 +144,10 @@ async function suggestOutputFilename(text: string, apiKey: string) {
   return aiOutputName(suggestion);
 }
 
-function transcriptionForm(file: File, language: string, prompt = '') {
+function transcriptionForm(file: File, language: string, model: TranscriptionModel, prompt = '') {
   const form = new FormData();
   form.append('file', file, file.name);
-  form.append('model', 'whisper-large-v3-turbo');
+  form.append('model', model);
   form.append('response_format', 'verbose_json');
   form.append('timestamp_granularities[]', 'segment');
   form.append('timestamp_granularities[]', 'word');
@@ -194,8 +219,9 @@ async function cleanSegments(result: Transcription, apiKey: string, strict = fal
 }
 
 async function transcribeChunked(
-  file: File, apiKey: string, language: string,
+  file: File, apiKey: string, language: string, model: TranscriptionModel,
   onPhase: (phase: string, progress?: number) => void,
+  onUploadProgress: (phase: string, loaded: number, total: number) => void,
 ): Promise<Transcription> {
   const { FFmpeg } = await import('@ffmpeg/ffmpeg');
   const ffmpeg = new FFmpeg();
@@ -227,11 +253,13 @@ async function transcribeChunked(
     const results: Transcription[] = [];
     let prompt = '';
     for (let index = 0; index < entries.length; index++) {
+      onPhase(`Preparing chunk ${index + 1} of ${entries.length}`);
       const entry = entries[index];
       const bytes = await ffmpeg.readFile(entry.name);
       const chunk = new File([bytes as Uint8Array<ArrayBuffer>], entry.name, { type: 'audio/flac' });
-      onPhase(`Sending chunk ${index + 1} of ${entries.length} to Groq`);
-      const response = await groqRequest('/audio/transcriptions', apiKey, transcriptionForm(chunk, language, prompt));
+      const uploadPhase = `Uploading chunk ${index + 1} of ${entries.length} to Groq`;
+      onPhase(uploadPhase);
+      const response = await groqUpload(transcriptionForm(chunk, language, model, prompt), apiKey, chunk.size, (loaded, total) => onUploadProgress(uploadPhase, loaded, total));
       const result = normalize(response);
       result.segments = result.segments.map(segment => ({ ...segment, start: segment.start + entry.start, end: segment.end + entry.start, words: segment.words?.map(word => ({ ...word, start: word.start + entry.start, end: word.end + entry.start })) }));
       result.duration = entry.end;
@@ -284,6 +312,7 @@ export default function Home() {
   const [showKey, setShowKey] = useState(false);
   const [format, setFormat] = useState<Format>('srt');
   const [language, setLanguage] = useState('auto');
+  const [transcriptionModel, setTranscriptionModel] = useState<TranscriptionModel>('whisper-large-v3-turbo');
   const [enhance, setEnhance] = useState(true);
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState('');
@@ -317,7 +346,7 @@ export default function Home() {
         try {
           const segments = parseSubtitle(await file.text());
           if (!segments.length) { problems.push(`${file.name}: no valid SRT or WebVTT cues found`); continue; }
-          valid.push({ id, file, kind: 'subtitle', status: 'done', segments, text: segments.map(segment => segment.text).join(' '), duration: segments.at(-1)?.end });
+          valid.push({ id, file, kind: 'subtitle', status: 'done', segments, text: segments.map(segment => segment.text).join(' '), duration: segments.at(-1)?.end, renameOutput: true, outputName: stem(file.name) });
         } catch { problems.push(`${file.name}: Unable to read subtitle file`); }
       } else valid.push({ id, file, kind: 'audio', status: 'queued' });
     }
@@ -342,37 +371,42 @@ export default function Home() {
   async function transcribe(job: Job): Promise<boolean> {
     try {
       if (!apiKey.trim()) throw new Error('Add your Groq API key above before transcribing.');
-      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: item.file.size > CHUNK_THRESHOLD_BYTES ? 'preparing' : 'working', phase: item.file.size > CHUNK_THRESHOLD_BYTES ? 'Preparing audio in this browser' : 'Sending directly to Groq', progress: 0, error: undefined } : item));
+      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: item.file.size > CHUNK_THRESHOLD_BYTES ? 'preparing' : 'working', phase: item.file.size > CHUNK_THRESHOLD_BYTES ? 'Preparing audio in this browser' : 'Uploading audio to Groq', progress: 0, uploadLoaded: 0, uploadTotal: job.file.size, error: undefined } : item));
       let result: Transcription;
       if (job.file.size > CHUNK_THRESHOLD_BYTES) {
-        result = await transcribeChunked(job.file, apiKey.trim(), language, (phase, progress) => {
-          setJobs(current => current.map(item => item.id === job.id ? { ...item, status: phase.startsWith('Sending chunk') ? 'working' : 'preparing', phase, progress } : item));
+        result = await transcribeChunked(job.file, apiKey.trim(), language, transcriptionModel, (phase, progress) => {
+          const uploading = phase.startsWith('Uploading chunk');
+          setJobs(current => current.map(item => item.id === job.id ? { ...item, status: uploading ? 'working' : 'preparing', phase, progress: uploading ? undefined : progress, uploadLoaded: uploading ? 0 : undefined, uploadTotal: undefined } : item));
+        }, (phase, loaded, total) => {
+          setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', phase, uploadLoaded: loaded, uploadTotal: total } : item));
         });
       } else {
-        const response = await groqRequest('/audio/transcriptions', apiKey.trim(), transcriptionForm(job.file, language));
+        const response = await groqUpload(transcriptionForm(job.file, language, transcriptionModel), apiKey.trim(), job.file.size, (loaded, total) => {
+          setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', phase: 'Uploading audio to Groq', uploadLoaded: loaded, uploadTotal: total } : item));
+        });
         result = normalize(response);
       }
       if (enhance) {
-        setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', phase: 'Cleaning up transcript with Groq', progress: undefined } : item));
+        setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', phase: 'Cleaning up transcript with Groq', progress: undefined, uploadLoaded: undefined, uploadTotal: undefined } : item));
         result = await cleanSegments(result, apiKey.trim());
       }
-      const renameOutput = format === 'srt' || format === 'vtt';
+      const renameOutput = true;
       let outputName = stem(job.file.name);
-      if (renameOutput) {
-        setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', phase: 'Naming subtitle file with Groq', progress: undefined } : item));
+      if (format === 'srt' || format === 'vtt') {
+        setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'working', phase: 'Naming subtitle file with Groq', progress: undefined, uploadLoaded: undefined, uploadTotal: undefined } : item));
         try {
           outputName = await suggestOutputFilename(result.text, apiKey.trim());
         } catch {
           setNotice('Transcript ready. The original filename stays in place because Groq could not suggest a name.');
         }
       }
-      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'done', text: result.text, segments: result.segments, duration: result.duration, language: result.language, enhanced: result.enhanced, renameOutput, outputName, phase: undefined, progress: undefined } : item));
+      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'done', text: result.text, segments: result.segments, duration: result.duration, language: result.language, enhanced: result.enhanced, renameOutput, outputName, phase: undefined, progress: undefined, uploadLoaded: undefined, uploadTotal: undefined } : item));
       return true;
     } catch (error) {
       const message = error instanceof TypeError
         ? 'Groq did not respond to the browser request. Check your connection, CORS access, or browser privacy extensions, then retry.'
         : error instanceof Error ? error.message : 'Something went wrong. Please try again.';
-      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'error', error: message, phase: undefined, progress: undefined } : item));
+      setJobs(current => current.map(item => item.id === job.id ? { ...item, status: 'error', error: message, phase: undefined, progress: undefined, uploadLoaded: undefined, uploadTotal: undefined } : item));
       return false;
     }
   }
@@ -537,6 +571,7 @@ export default function Home() {
             <div className="transcription-options">
               {(!jobs.length || jobs.some(job => job.kind === 'audio')) ? <>
                 <label className="select-wrap"><span>Audio language</span><select value={language} onChange={event => setLanguage(event.target.value)} disabled={busy}><option value="auto">Detect automatically</option><option value="en">English</option><option value="de">German</option><option value="es">Spanish</option><option value="fr">French</option><option value="it">Italian</option><option value="pt">Portuguese</option><option value="nl">Dutch</option><option value="ja">Japanese</option><option value="zh">Chinese</option></select></label>
+                <label className="select-wrap model-select"><span>Transcription model</span><select value={transcriptionModel} onChange={event => setTranscriptionModel(event.target.value as TranscriptionModel)} disabled={busy}><option value="whisper-large-v3-turbo">Whisper Large V3 Turbo</option><option value="whisper-large-v3">Whisper Large V3</option></select><small>{transcriptionModel === 'whisper-large-v3-turbo' ? 'About $0.04/hour · faster, lower cost, slightly less accurate.' : 'About $0.111/hour · higher accuracy, slower, higher cost.'} Groq rates may change.</small></label>
                 <label className="enhance-toggle"><input type="checkbox" checked={enhance} onChange={event => setEnhance(event.target.checked)} disabled={busy}/><span className="switch" aria-hidden="true"/><span><b>Clean up automatically</b><small>Fix grammar, punctuation and readability</small></span></label>
               </> : <p className="subtitle-local">SRT and WebVTT files convert locally.</p>}
             </div>
@@ -545,9 +580,10 @@ export default function Home() {
           <div className="queue-head"><h3>Queue <span>{jobs.length}</span></h3>{jobs.length > 0 && <button className="quiet-button" onClick={() => { setJobs([]); setActive(null); setNotice(''); }}>Clear all</button>}</div>
           {jobs.length === 0 ? <div className="empty-queue">Your audio files will appear here.</div> : <ul className="file-list">{jobs.map(job => <li className="file-row" key={job.id}>
             <div className="file-type" aria-hidden="true">{job.kind === 'subtitle' ? '≡' : '♪'}</div><div className="file-info"><strong title={job.file.name}>{job.file.name}</strong><span>{sizeLabel(job.file.size)}{job.duration ? ` · ${Math.floor(job.duration / 60)}:${String(Math.floor(job.duration % 60)).padStart(2, '0')}` : ''}</span></div>
-            <div className={`file-status status-${job.status}`} aria-live="polite">{job.status === 'preparing' ? <><span className="spinner"/>{job.phase || 'Preparing audio'}{job.progress !== undefined ? ` ${job.progress}%` : ''}</> : job.status === 'working' ? <><span className="spinner"/>{job.phase || 'Sending to Groq'}</> : job.status === 'done' ? 'Ready' : job.status === 'error' ? 'Needs attention' : 'In queue'}</div>
+            <div className={`file-status status-${job.status}`} aria-live="polite">{job.status === 'preparing' ? <><span className="spinner"/>{job.phase || 'Preparing audio'}</> : job.status === 'working' ? <><span className="spinner"/>{job.phase || 'Sending to Groq'}</> : job.status === 'done' ? 'Ready' : job.status === 'error' ? 'Needs attention' : 'In queue'}</div>
             {job.status === 'done' ? <button className="row-action" aria-label={`View ${job.file.name} transcript`} onClick={() => setActive(job.id)}>Open</button> : job.status === 'error' ? <button className="row-action" onClick={() => retryUpload(job)}>Retry</button> : null}
             <button className="remove-button" aria-label={`Remove ${job.file.name}`} onClick={() => remove(job.id)}>×</button>
+            {job.status === 'working' && job.uploadTotal ? <div className="upload-progress"><div className="progress-caption"><span>{job.phase || 'Uploading to Groq'}</span><span>{transferLabel(job.uploadLoaded || 0)} / {transferLabel(job.uploadTotal)}</span></div><div className="progress-track" role="progressbar" aria-label={`Upload progress for ${job.file.name}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progressPercent(job.uploadLoaded || 0, job.uploadTotal)} aria-valuetext={`${transferLabel(job.uploadLoaded || 0)} of ${transferLabel(job.uploadTotal)} uploaded`}><span style={{ width: `${progressPercent(job.uploadLoaded || 0, job.uploadTotal)}%` }}/></div></div> : job.status === 'preparing' && job.progress !== undefined ? <div className="upload-progress"><div className="progress-caption"><span>Preparing {sizeLabel(job.file.size)} in this browser</span><span>{job.progress}%</span></div><div className="progress-track" role="progressbar" aria-label={`Browser audio preparation for ${job.file.name}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={job.progress}><span style={{ width: `${job.progress}%` }}/></div></div> : null}
             {job.error && <p className="row-error">{job.error}</p>}
           </li>)}</ul>}
           {notice && <p className="notice" role="alert">{notice}</p>}

@@ -17,7 +17,7 @@ export default function Terms() {
       <p>This draft describes the current Groq Transcribe prototype. The operator must approve final terms before launch.</p>
 
       <h2>Service</h2>
-      <p>Groq Transcribe is a bring-your-own-key tool. Enter your Groq API key. Your browser sends audio and optional cleanup requests directly to Groq. Files above 20 MB are split into eight-minute FLAC chunks in your browser. Vercel’s 4 MB function request limit does not apply because audio bypasses Vercel Functions. SRT and WebVTT files convert locally. SRT and WebVTT exports receive a Groq-generated filename by default. The Name with AI button sends a second request for a new suggestion. The app does not store or proxy your key.</p>
+      <p>Groq Transcribe is a bring-your-own-key tool. Enter your Groq API key. Your browser sends audio and optional cleanup requests directly to Groq. Choose between whisper-large-v3-turbo, which is faster and lower cost, or whisper-large-v3, which is slower, higher cost, and designed for higher accuracy. Groq pricing can change. Files above 20 MB are split into eight-minute FLAC chunks in your browser. Vercel’s 4 MB function request limit does not apply because audio bypasses Vercel Functions. SRT and WebVTT files convert locally. SRT and WebVTT exports receive a Groq-generated filename by default unless you turn off Rename subtitle file. The Name with AI button sends a second request for a new suggestion. The app does not store or proxy your key.</p>
 
       <h2>Your files</h2>
       <p>You need permission to submit recordings and use transcripts. Do not submit unlawful recordings or content without permission. Transcription errors occur. Review each transcript before publication or any use where accuracy matters.</p>
