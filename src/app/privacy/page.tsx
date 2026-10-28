@@ -20,7 +20,7 @@ export default function Privacy() {
       <p>Your browser sends audio and your Groq API key directly to Groq over HTTPS. Files above 20 MB are converted in your browser to eight-minute FLAC chunks. Your browser sends each chunk to Groq. The app does not send audio or the key through a Vercel API route or Blob store. Transcript cleanup sends text segments to Groq. SRT and WebVTT conversion runs in your browser. If you select Name with AI, your browser sends up to 6,000 characters of transcript text to Groq to create a filename.</p>
 
       <h2>Storage</h2>
-      <p>The app has no database. Your API key and transcripts stay in page memory. Refreshing or closing the tab clears them. Your browser creates downloaded files. Vercel serves the app and its static assets. The app sends no audio, transcript, or API key to Vercel endpoints.</p>
+      <p>The app has no database. Your API key and transcripts stay in page memory. Refreshing or closing the tab clears them. Your browser creates downloaded files and stores notification permission. Optional alerts show file counts and completion status, not filenames or transcript text. Vercel serves the app and its static assets. The app sends no audio, transcript, or API key to Vercel endpoints.</p>
 
       <h2>API key and security</h2>
       <p>You enter your own Groq API key. The browser sends the key in the authorization header to Groq. The app does not save the key. Scripts on this site access the key while the page stays open. Enter a key only when you trust this site. Revoke or rotate an exposed key in Groq Console. The app has no accounts, analytics, or tracking cookies.</p>

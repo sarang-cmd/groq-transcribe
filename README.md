@@ -15,6 +15,7 @@ A BYOK tool for audio transcription, subtitle conversion, and transcript export.
 - TXT, SRT, WebVTT, and JSON exports, plus ZIP download
 - AI-suggested or custom filenames for SRT and WebVTT exports
 - AI filename requests send up to 6,000 transcript characters to Groq after you choose Name with AI
+- Optional browser alerts for upload start and finish, using the app icon
 
 ## Groq limits
 
