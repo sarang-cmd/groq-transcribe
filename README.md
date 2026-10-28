@@ -7,14 +7,20 @@ A BYOK tool for audio transcription, subtitle conversion, and transcript export.
 ## Features
 
 - MP3, MP4, MPEG, M4A, WAV, WebM, OGG, and FLAC audio, up to 200 MiB per file
-- Direct Groq transcription with `whisper-large-v3-turbo` and your key
+- Direct Groq transcription with a model selector and your key
+- `whisper-large-v3-turbo`: about $0.04 per audio hour, faster and lower cost, with slightly lower accuracy
+- `whisper-large-v3`: about $0.111 per audio hour, with higher accuracy at a higher cost and slower speed
+- These rates are from Groq documentation and may change. Check current pricing before use.
 - Browser-side eight-minute mono 16 kHz FLAC chunks for files over 20 MiB
+- Live upload progress with megabytes sent and total size; browser preparation progress for large files
 - Combined transcript text and timestamps
-- Optional Groq transcript cleanup with `llama-3.3-70b-versatile`
+- Optional transcript cleanup and on-demand grammar fixes with `openai/gpt-oss-120b`
+- Output format selection before transcription
+- Audio playback with synchronized word-level transcript highlighting
 - Local SRT and WebVTT conversion
 - TXT, SRT, WebVTT, and JSON exports, plus ZIP download
 - AI-suggested or custom filenames for SRT and WebVTT exports
-- AI filename requests send up to 6,000 transcript characters to Groq after you choose Name with AI
+- SRT and WebVTT exports use an AI-generated filename by default, unless you turn off Rename subtitle file. Each request sends up to 6,000 transcript characters to Groq.
 - Optional browser alerts for upload start and finish, using the app icon
 
 ## Groq limits
